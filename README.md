@@ -1,6 +1,6 @@
 # ESP_HUD - 基于ESP32的抬头显示器(HUD)
 
-![License](https://img.shields.io/github/license/yourusername/ESP_HUD)
+![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-ESP32--S3-blue)
 ![LVGL](https://img.shields.io/badge/LVGL-v8.3.11-green)
 
@@ -176,6 +176,9 @@ typedef struct __attribute__((packed)) {
        lovyan03/LovyanGFX@1.1.12
        lvgl/lvgl@8.3.11
    ```
+
+4. **配置LVGL**
+   将 `lib/lv_conf.h` 文件复制到 `.pio/libdeps/sc01_plus/lvgl/` 目录下，替换默认配置文件
 
 ### 编译和烧录
 
