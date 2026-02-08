@@ -57,9 +57,10 @@ static void app_task(void *param)
         int token;
 
         if (imgf_rx_get_ready(imgf, &png, &plen, &pseq, &token)) {
-            /* 零拷贝：将buffer所有权转移给UI系统 */
-            ui_request_set_png(png, plen, token, imgf_release_adapter);
-            /* 不再提前释放，由UI系统在使用完成后释放 */
+                /* 零拷贝：将buffer所有权转移给UI系统 */
+                Serial0.println("Got PNG");
+                ui_request_set_png(png, plen, token, imgf_release_adapter);
+                        /* 不再提前释放，由UI系统在使用完成后释放 */
         }
 
         vTaskDelay(pdMS_TO_TICKS(1));
@@ -70,7 +71,7 @@ static void app_task(void *param)
 
 void setup()
 {
-    Serial.begin(115200);
+    Serial0.begin(115200);
 
     /* UI */
     lvgl_port_init();
@@ -88,7 +89,7 @@ void setup()
     usb_sr_config_t rcfg = {
         .rx_task_priority = 18,
         .rx_task_stack    = 6144,
-        .rx_task_core     = 1,
+        .rx_task_core     = 0,
         .read_chunk       = 8192,
         .max_receivers    = 4
     };
@@ -125,6 +126,7 @@ void setup()
         nullptr,
         0
     );
+    Serial0.println("Init done");
 }
 
 void loop()

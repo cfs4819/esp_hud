@@ -69,27 +69,36 @@ graph LR
     style H fill:#ffe0b2
 ```
 
-### 线程模型图
+### 线程模型与队列架构
 
 ```mermaid
 graph TB
     subgraph "Core 0 - 业务处理"
         A[USB接收任务<br/>优先级18] --> B[数据解析]
-        B --> C[消息分发]
-        C --> D[应用任务<br/>优先级4]
+        B --> C{数据类型}
+        C -->|MSGF| D[MSG队列<br/>深度8]
+        C -->|IMGF| E[IMG队列<br/>深度2]
+        
+        D --> F[应用任务<br/>优先级4]
+        E --> F
     end
     
     subgraph "Core 1 - UI渲染"
-        E[LVGL任务<br/>优先级5] --> F[界面更新]
-        F --> G[屏幕刷新]
+        G[LVGL任务<br/>优先级5] --> H[界面更新]
+        H --> I[屏幕刷新]
     end
     
-    D -.-> H[UI桥接队列]
-    H -.-> F
+    D --> J[UI桥接(MSG)]
+    E --> K[UI桥接(IMG)]
+    J --> H
+    K --> H
     
     style A fill:#e3f2fd
-    style E fill:#e8f5e8
-    style H fill:#fce4ec
+    style D fill:#bbdefb
+    style E fill:#ffccbc
+    style G fill:#e8f5e8
+    style J fill:#b2dfdb
+    style K fill:#ffecb3
 ```
 
 ### 主要模块说明
@@ -108,11 +117,16 @@ graph TB
 - **[ui_bridge.h/.cpp](include/ui_bridge.h)**: UI更新桥接层，实现线程安全的界面更新
 - **[SquareLine UI](src/squareline/)**: 基于SquareLine Studio设计的仪表盘界面
 
+#### ⚙️ 队列管理系统
+- **MSG队列**: 专门处理高频车身状态数据，深度8，支持覆盖写入
+- **IMG队列**: 专门处理大尺寸地图图像数据，深度4，保证数据完整性
+- **零拷贝传输**: 图像数据直接传递指针，减少内存拷贝开销
+
 #### 🎮 应用逻辑层
 - **[main.cpp](src/main.cpp)**: 系统入口和任务调度
 - **[host_pc.py](example/host_pc.py)**: 上位机模拟器示例
 
-## 📊 通信协议
+## 📊 通信协议与队列管理
 
 ### 帧格式定义
 

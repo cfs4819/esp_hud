@@ -27,17 +27,22 @@ uint16 trip_time_min   // 行程分钟数
 ... reserve(可选)
 
 依赖：
-pip install pyserial
+pip install pyserial pillow
 """
 
 import argparse
 import struct
 import time
+import requests
+import io
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List
 
 import serial
+from PIL import Image
 
+TRACK_URL = "http://43.128.232.127:8123/track/image"
+MAX_PNG_SIZE = 200 * 1024  # 200KB
 
 MAGIC_MSGF = b"MSGF"
 MAGIC_IMGF = b"IMGF"
@@ -63,6 +68,40 @@ def hhmm_to_minutes(hhmm: str) -> int:
     if not (0 <= h <= 23 and 0 <= m <= 59):
         raise ValueError("time must be HH:MM within 00:00..23:59")
     return h * 60 + m
+
+
+class TrackImageFetcher:
+    def __init__(self, points: List[List[float]]):
+        self.points = points
+        self.count = 0
+
+    def fetch_next(self) -> bytes:
+        now = time.time()
+        self.count += 1
+        if self.count == 1:
+            body = {"points": self.points[:2]}
+        else:
+            body = {"points": self.points[:self.count]}
+        header = {
+            "Content-Type": "application/json",
+            "accept": "application/json"
+        }
+
+        resp = requests.post(
+            TRACK_URL,
+            json=body,
+            headers=header,
+            timeout=10,
+        )
+        resp.raise_for_status()
+
+        png = resp.content
+        if len(png) > MAX_PNG_SIZE:
+            raise ValueError(f"PNG too large: {len(png)} bytes")
+        
+        print(f"\r\n Fetched {len(png)} bytes in {int((time.time() - now) * 1000):03d} ms")
+
+        return png
 
 
 @dataclass
@@ -118,13 +157,55 @@ class HostSender:
         with open(png_path, "rb") as f:
             png = f.read()
         self.send_frame(MAGIC_IMGF, png)
+    
+    def send_imgf_bytes(self, png: bytes):
+        now = time.time()
+        self.send_frame(MAGIC_IMGF, png)
+        print(f" Sent IMGF {len(png)} bytes in {int((time.time() - now) * 1000):03d} ms")
+
+    def send_imgf_r565_bytes(self, frame: bytes):
+        now = time.time()
+        self.send_frame(MAGIC_IMGF, frame)
+        print(f" Sent IMGF(R565) {len(frame)} bytes in {int((time.time() - now) * 1000):03d} ms")
 
 
-def run_demo(sender: HostSender, hz: float, png_path: Optional[str], png_every_s: float):
+def png_to_r565_frame(png: bytes, resize_to: Optional[tuple[int, int]] = None, swap_bytes: bool = False) -> bytes:
+    img = Image.open(io.BytesIO(png)).convert("RGB")
+    if resize_to:
+        try:
+            resample = Image.Resampling.BILINEAR
+        except AttributeError:
+            resample = Image.BILINEAR
+        img = img.resize(resize_to, resample)
+    w, h = img.size
+    raw = bytearray()
+    for r, g, b in img.getdata():
+        v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+        if swap_bytes:
+            raw.extend(struct.pack(">H", v))
+        else:
+            raw.extend(struct.pack("<H", v))
+    # 8 bytes header: "R565" + w + h
+    return b"R565" + struct.pack("<HH", w, h) + bytes(raw)
+
+
+
+def run_demo(
+    sender: HostSender, hz: float, 
+    png_path: Optional[str], 
+    png_every_s: float,
+    fetcher: Optional[TrackImageFetcher],
+    track_every_s: float,
+    img_mode: str,
+    img_w: Optional[int],
+    img_h: Optional[int],
+    r565_swap_bytes: bool,
+    ):
     """演示：MSGF 按 hz 发送；IMGF 每 png_every_s 秒发一次（如果提供 png_path）"""
     period = 1.0 / hz
     next_png = time.time() + png_every_s if (png_path and png_every_s > 0) else float("inf")
-
+    next_fetch = time.time() + track_every_s if fetcher else float("inf")
+    
     # 初始化一些演示数据
     speed = 80
     rpm = 1800
@@ -164,13 +245,38 @@ def run_demo(sender: HostSender, hz: float, png_path: Optional[str], png_every_s
             curr_time_min=curr_min,
             trip_time_min=trip_min,
         )
-
+        print(f" Sent MSGF {speed:03.0f} {rpm:04.0f} {odo:08.0f} {trip:08.0f} {out_t:02.0f} {in_t:02.0f} {batt:02.0f} {curr_min:04d} {trip_min:04d}", end="\r")
         sender.send_msgf(snap)
-
-        # 可选：定时发送 PNG
-        if now >= next_png:
-            sender.send_imgf(png_path)
+        
+        # 原有：本地 PNG demo
+        if now >= next_png and png_path:
+            with open(png_path, "rb") as f:
+                png = f.read()
+            if img_mode == "r565":
+                frame = png_to_r565_frame(
+                    png,
+                    (img_w, img_h) if img_w and img_h else None,
+                    swap_bytes=r565_swap_bytes,
+                )
+                sender.send_imgf_r565_bytes(frame)
+            else:
+                sender.send_imgf_bytes(png)
             next_png = now + png_every_s
+
+        # 新增：远程轨迹 PNG
+        if fetcher and now >= next_fetch:
+            png = fetcher.fetch_next()
+            if img_mode == "r565":
+                frame = png_to_r565_frame(
+                    png,
+                    (img_w, img_h) if img_w and img_h else None,
+                    swap_bytes=r565_swap_bytes,
+                )
+                sender.send_imgf_r565_bytes(frame)
+            else:
+                sender.send_imgf_bytes(png)
+            next_fetch = now + track_every_s
+
 
         # 固定频率循环
         elapsed = time.time() - last
@@ -181,7 +287,8 @@ def run_demo(sender: HostSender, hz: float, png_path: Optional[str], png_every_s
 
 
 def run_once(sender: HostSender, speed: int, rpm: int, odo: int, trip: int, out_t: int, in_t: int, batt: int,
-             curr_time: str, trip_min: int, png_path: Optional[str]):
+             curr_time: str, trip_min: int, png_path: Optional[str], img_mode: str,
+             img_w: Optional[int], img_h: Optional[int], r565_swap_bytes: bool):
     snap = MsgfSnapshot(
         speed_kmh=speed,
         engine_rpm=rpm,
@@ -195,7 +302,17 @@ def run_once(sender: HostSender, speed: int, rpm: int, odo: int, trip: int, out_
     )
     sender.send_msgf(snap)
     if png_path:
-        sender.send_imgf(png_path)
+        with open(png_path, "rb") as f:
+            png = f.read()
+        if img_mode == "r565":
+            frame = png_to_r565_frame(
+                png,
+                (img_w, img_h) if img_w and img_h else None,
+                swap_bytes=r565_swap_bytes,
+            )
+            sender.send_imgf_r565_bytes(frame)
+        else:
+            sender.send_imgf_bytes(png)
 
 
 def main():
@@ -208,6 +325,13 @@ def main():
     ap.add_argument("--hz", type=float, default=24.0, help="MSGF 发送频率")
     ap.add_argument("--png", type=str, default=None, help="PNG 文件路径（IMGF）")
     ap.add_argument("--png-every", type=float, default=29.0, help="多少秒发送一次 PNG（demo 模式）")
+    ap.add_argument("--track", action="store_true", help="启用远程轨迹 PNG")
+    ap.add_argument("--track-every", type=float, default=25.0)
+    ap.add_argument("--img-mode", choices=["png", "r565"], default="png", help="图片发送模式：PNG或RGB565原始帧")
+    ap.add_argument("--img-w", type=int, default=None, help="r565模式可选：重采样宽度")
+    ap.add_argument("--img-h", type=int, default=None, help="r565模式可选：重采样高度")
+    ap.add_argument("--r565-swap-bytes", action="store_true", help="r565模式可选：交换RGB565高低字节")
+
 
     # once 参数
     ap.add_argument("--speed", type=int, default=80)
@@ -223,11 +347,101 @@ def main():
     args = ap.parse_args()
 
     sender = HostSender(args.port, args.baud)
+    fetcher = None
+    if args.track:
+        TRACK_POINTS = [
+            [121.154031, 31.157299],
+            [121.154365, 31.155985],
+            [121.154744, 31.154187],
+            [121.154915, 31.152359],
+            [121.154964, 31.151833],
+            [121.153753, 31.151841],
+            [121.152769, 31.151813],
+            [121.151304, 31.151563],
+            [121.149513, 31.150837],
+            [121.148349, 31.150036],
+            [121.146422, 31.148348],
+            [121.14429, 31.146466],
+            [121.141302, 31.143829],
+            [121.139483, 31.142251],
+            [121.137232, 31.140924],
+            [121.134626, 31.140155],
+            [121.132587, 31.139938],
+            [121.130001, 31.139823],
+            [121.125761, 31.139634],
+            [121.122411, 31.139488],
+            [121.121591, 31.139449],
+            [121.121424, 31.138729],
+            [121.121332, 31.137331],
+            [121.121301, 31.135821],
+            [121.121329, 31.134526],
+            [121.121266, 31.133201],
+            [121.120599, 31.133007],
+            [121.119659, 31.133548],
+            [121.11915, 31.134453],
+            [121.118852, 31.136648],
+            [121.11944, 31.137946],
+            [121.120364, 31.13758],
+            [121.11965, 31.136552],
+            [121.117848, 31.135905],
+            [121.115562, 31.134899],
+            [121.113321, 31.133638],
+            [121.110643, 31.131903],
+            [121.106918, 31.129432],
+            [121.099019, 31.124187],
+            [121.092517, 31.119858],
+            [121.087278, 31.116388],
+            [121.078716, 31.110698],
+            [121.073428, 31.107181],
+            [121.068503, 31.103923],
+            [121.063857, 31.101107],
+            [121.060714, 31.099495],
+            [121.056252, 31.0976],
+            [121.052679, 31.096383],
+            [121.049606, 31.095503],
+            [121.045493, 31.094575],
+            [121.042038, 31.094007],
+            [121.038549, 31.093621],
+            [121.035305, 31.093432],
+            [121.032624, 31.093385],
+            [121.029315, 31.093359],
+            [121.023084, 31.093309],
+            [121.014997, 31.093246],
+            [121.009183, 31.0932],
+            [121.004524, 31.092894],
+            [120.999189, 31.091772],
+            [120.994219, 31.089922],
+            [120.98963, 31.08734],
+            [120.983975, 31.083578],
+            [120.979236, 31.079077],
+            [120.974736, 31.077291],
+            [120.968544, 31.074847],
+            [120.962446, 31.074348],
+            [120.961548, 31.072195],
+            [120.964472, 31.07324],
+            [120.974736, 31.077291],
+            [120.983928, 31.076962]
+        ]
+        fetcher = TrackImageFetcher(TRACK_POINTS)
     try:
         if args.mode == "demo":
-            run_demo(sender, hz=args.hz, png_path=args.png, png_every_s=args.png_every)
+            run_demo(
+                sender,
+                hz=args.hz,
+                png_path=args.png,
+                png_every_s=args.png_every,
+                fetcher=fetcher,
+                track_every_s=args.track_every,
+                img_mode=args.img_mode,
+                img_w=args.img_w,
+                img_h=args.img_h,
+                r565_swap_bytes=args.r565_swap_bytes,
+            )
         else:
-            run_once(sender, args.speed, args.rpm, args.odo, args.trip, args.out_t, args.in_t, args.batt, args.time, args.trip_min, args.png)
+            run_once(sender, args.speed, args.rpm, args.odo, args.trip,
+                    args.out_t, args.in_t, args.batt,
+                    args.time, args.trip_min, args.png, args.img_mode, args.img_w, args.img_h,
+                    args.r565_swap_bytes)
     finally:
         sender.close()
 

@@ -17,8 +17,7 @@ static const uint16_t screenWidth  = 480;
 static const uint16_t screenHeight = 320;
 
 static lv_disp_draw_buf_t draw_buf;
-// 10 行缓冲 * 双缓冲：你原来的设置
-static lv_color_t buf[2][ screenWidth * 10 ];
+static lv_color_t buf[2][ screenWidth * 100 ];
 
 /* Display flushing */
 static void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
@@ -77,7 +76,7 @@ void lvgl_port_init(void)
 
     // LVGL
     lv_init();
-    lv_disp_draw_buf_init(&draw_buf, buf[0], buf[1], screenWidth * 10);
+    lv_disp_draw_buf_init(&draw_buf, buf[0], buf[1], screenWidth * 100);
 
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
@@ -103,9 +102,9 @@ void lvgl_port_init(void)
     xTaskCreatePinnedToCore(
         lvgl_task,
         "lvgl",
-        4096,
+        6144,
         nullptr,
-        5,
+        8,
         nullptr,
         1
     );

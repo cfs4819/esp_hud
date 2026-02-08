@@ -53,7 +53,7 @@ typedef struct {
 
 typedef enum {
     UI_EV_SNAPSHOT = 1,
-    UI_EV_PNG_ITEM  // 改为存储PNG项而不是快照
+    UI_EV_PNG_ITEM = 2
 } ui_ev_type_t;
 
 typedef struct {
@@ -64,7 +64,14 @@ typedef struct {
     };
 } ui_event_t;
 
-static QueueHandle_t s_ui_q = nullptr;
+// 分别为MSG和IMG创建独立队列
+static QueueHandle_t s_msg_q = nullptr;  // MSG队列 - 用于快速的小数据
+static QueueHandle_t s_img_q = nullptr;  // IMG队列 - 用于慢速的大数据
+
+// 当前正在被lv_img对象引用的PNG buffer信息
+static bool s_active_png_valid = false;
+static int s_active_png_token = -1;
+static void (*s_active_png_release_cb)(int) = nullptr;
 
 /* ---------- LVGL 内部工具 ---------- */
 
@@ -108,15 +115,28 @@ static void apply_png_lvgl(const png_item_t *it)
     img_dsc.header.always_zero = 0;
     img_dsc.header.w = 0;
     img_dsc.header.h = 0;
-    img_dsc.header.cf = LV_IMG_CF_RAW;
+    img_dsc.header.cf = LV_IMG_CF_RAW_ALPHA;
     img_dsc.data_size = it->len;
     img_dsc.data = it->png;
-    
-    lv_img_set_src(ui_Map_Bg, &img_dsc);
 
-    /* 关键：LVGL 已经拿到数据，现在可以安全释放 */
+    // 同一img_dsc地址承载不同PNG数据时，先失效缓存，避免读到旧解码结果
+    lv_img_cache_invalidate_src(&img_dsc);
+    lv_img_set_src(ui_Map_Bg, &img_dsc);
+    
+    // 新图切换成功后，释放上一张仍被对象持有的buffer
+    if (s_active_png_valid && s_active_png_release_cb) {
+        s_active_png_release_cb(s_active_png_token);
+    }
+
+    // 记录当前图对应的buffer，直到下一次替换时再释放
     if (it->release_cb) {
-        it->release_cb(it->token);
+        s_active_png_valid = true;
+        s_active_png_token = it->token;
+        s_active_png_release_cb = it->release_cb;
+    } else {
+        s_active_png_valid = false;
+        s_active_png_token = -1;
+        s_active_png_release_cb = nullptr;
     }
 }
 
@@ -124,16 +144,21 @@ static void apply_png_lvgl(const png_item_t *it)
 
 void ui_bridge_init(void)
 {
-    if (!s_ui_q) {
-        /* 深度 4 就够：UI 永远只需要最新状态 */
-        s_ui_q = xQueueCreate(4, sizeof(ui_event_t));
+    if (!s_msg_q) {
+        /* MSG队列：只保留最新快照，降低UI线程负担 */
+        s_msg_q = xQueueCreate(1, sizeof(ui_event_t));
+    }
+    
+    if (!s_img_q) {
+        /* IMG队列：深度2，适合低频大数据 */
+        s_img_q = xQueueCreate(2, sizeof(ui_event_t));
     }
 }
 
 void ui_request_msg(const uint8_t *d, size_t len, uint32_t seq)
 {
     (void)seq;
-    if (!d || len < 22 || !s_ui_q) return;
+    if (!d || len < 22 || !s_msg_q) return;
 
     ui_event_t ev;
     ev.type = UI_EV_SNAPSHOT;
@@ -148,8 +173,8 @@ void ui_request_msg(const uint8_t *d, size_t len, uint32_t seq)
     ev.snap.cur_time_min = (uint16_t)(d[18] | (d[19]<<8));
     ev.snap.trip_time_min= (uint16_t)(d[20] | (d[21]<<8));
 
-    /* 满了就覆盖旧的（仪表盘语义：只关心最新） */
-    xQueueOverwrite(s_ui_q, &ev);
+    // 仪表语义：只关心最新状态，覆盖旧快照
+    xQueueOverwrite(s_msg_q, &ev);
 }
 
 void ui_request_set_png(const uint8_t *png,
@@ -157,7 +182,7 @@ void ui_request_set_png(const uint8_t *png,
                        int imgf_token,
                        void (*release_cb)(int token))
 {
-    if (!s_ui_q || !png || len == 0) return;
+    if (!s_img_q || !png || len == 0) return;
 
     ui_event_t ev;
     ev.type = UI_EV_PNG_ITEM;
@@ -165,29 +190,67 @@ void ui_request_set_png(const uint8_t *png,
     ev.png_item.len = len;
     ev.png_item.token = imgf_token;
     ev.png_item.release_cb = release_cb;
-
-    // 使用发送而非覆盖，确保不会丢失重要更新
-    if (xQueueSend(s_ui_q, &ev, 0) != pdTRUE) {
-        // 队列满时立即释放（这种情况很少发生）
-        if (release_cb) {
-            release_cb(imgf_token);
+    
+    // IMG队列使用发送语义：避免数据丢失
+    if (xQueueSend(s_img_q, &ev, 0) != pdTRUE) {
+        // 队列满时丢弃最旧帧并释放其token，优先保留最新帧
+        ui_event_t dropped;
+        if (xQueueReceive(s_img_q, &dropped, 0) == pdTRUE &&
+            dropped.type == UI_EV_PNG_ITEM &&
+            dropped.png_item.release_cb) {
+            dropped.png_item.release_cb(dropped.png_item.token);
         }
-        Serial.println("[UI_BRIDGE] UI queue full, dropped PNG update");
+
+        if (xQueueSend(s_img_q, &ev, 0) != pdTRUE) {
+            if (release_cb) {
+                release_cb(imgf_token);
+            }
+            Serial0.println("[UI_BRIDGE] IMG queue full, dropped newest PNG update");
+        } else {
+            Serial0.println("[UI_BRIDGE] IMG queue full, replaced oldest PNG update");
+        }
+    }
+    else {
+        Serial0.println("[UI_BRIDGE] PNG queued successfully");
     }
     // 注意：这里不调用release_cb，让LVGL线程在使用完后释放
 }
 
 void ui_bridge_apply_pending(void)
 {
-    if (!s_ui_q) return;
+    if (!s_msg_q && !s_img_q) return;
 
     ui_event_t ev;
-    while (xQueueReceive(s_ui_q, &ev, 0) == pdTRUE) {
-        if (ev.type == UI_EV_SNAPSHOT) {
-            apply_snapshot_lvgl(&ev.snap);
-        } else if (ev.type == UI_EV_PNG_ITEM) {
-            // 零拷贝：直接使用传入的数据，渲染完成后释放
-            apply_png_lvgl(&ev.png_item);
+
+    // 优先处理MSG数据（高频小数据）
+    if (s_msg_q) {
+        while (xQueueReceive(s_msg_q, &ev, 0) == pdTRUE) {
+            if (ev.type == UI_EV_SNAPSHOT) {
+                apply_snapshot_lvgl(&ev.snap);
+            }
+        }
+    }
+
+    // 然后处理IMG数据（低频大数据）
+    if (s_img_q) {
+        // 只处理最新一张，避免解码过期帧导致延迟累积
+        bool has_latest = false;
+        png_item_t latest = {};
+
+        while (xQueueReceive(s_img_q, &ev, 0) == pdTRUE) {
+            if (ev.type == UI_EV_PNG_ITEM) {
+                if (has_latest && latest.release_cb) {
+                    latest.release_cb(latest.token);
+                }
+                latest = ev.png_item;
+                has_latest = true;
+            }
+        }
+
+        if (has_latest) {
+            Serial0.println("[UI_BRIDGE] applying latest image update");
+            apply_png_lvgl(&latest);
+            Serial0.println("[UI_BRIDGE] latest image update applied");
         }
     }
 }

@@ -24,7 +24,6 @@ extern lv_obj_t * ui_Label_Celsius2;
 extern lv_obj_t * ui_Label_Battery_Number1;
 extern lv_obj_t * ui_Label_Battery_Percent1;
 extern lv_obj_t * ui_Group_Driving;
-extern lv_obj_t * ui_Group_Content;
 extern lv_obj_t * ui_LabeL_ODO1;
 extern lv_obj_t * ui_Group_ODO1;
 extern lv_obj_t * ui_Label_ODO_Number1;
