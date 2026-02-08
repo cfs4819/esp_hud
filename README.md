@@ -18,37 +18,7 @@ ESP_HUD是一个基于ESP32-S3的抬头显示器(HUD)项目，专为车载应用
   <img src="doc/image_demo.png" alt="ESP_HUD演示效果" width="75%">
 </div>
 
-## 🏗️ 系统架构
 
-### 核心组件架构图
-
-```mermaid
-graph TD
-    A[上位机<br/>车机系统] <-- USB CDC --> B[ESP32-S3<br/>HUD主机]
-    
-    B --> C[数据路由<br/>Router]
-    B --> D[图像接收<br/>IMGF]
-    B --> E[消息接收<br/>MSGF]
-    
-    C --> F[UI桥接层<br/>UI Bridge]
-    D --> F
-    E --> F
-    
-    F --> G[LVGL渲染<br/>显示输出]
-    
-    subgraph "硬件层"
-        H[显示屏驱动<br/>PanelLan]
-        I[触摸输入]
-    end
-    
-    G --> H
-    G --> I
-    
-    style A fill:#e1f5fe
-    style B fill:#f3e5f5
-    style F fill:#e8f5e8
-    style G fill:#fff3e0
-```
 
 ### 数据流向图
 
@@ -71,38 +41,6 @@ graph LR
     style B fill:#c8e6c9
     style G fill:#f8bbd9
     style H fill:#ffe0b2
-```
-
-### 线程模型与队列架构
-
-```mermaid
-graph TB
-    subgraph "Core 0 - 业务处理"
-        A[USB接收任务<br/>优先级18] --> B[数据解析]
-        B --> C{数据类型}
-        C -->|MSGF| D[MSG队列<br/>深度8]
-        C -->|IMGF| E[IMG队列<br/>深度2]
-        
-        D --> F[应用任务<br/>优先级4]
-        E --> F
-    end
-    
-    subgraph "Core 1 - UI渲染"
-        G[LVGL任务<br/>优先级5] --> H[界面更新]
-        H --> I[屏幕刷新]
-    end
-    
-    D --> J[UI桥接(MSG)]
-    E --> K[UI桥接(IMG)]
-    J --> H
-    K --> H
-    
-    style A fill:#e3f2fd
-    style D fill:#bbdefb
-    style E fill:#ffccbc
-    style G fill:#e8f5e8
-    style J fill:#b2dfdb
-    style K fill:#ffecb3
 ```
 
 ### 主要模块说明
@@ -164,7 +102,6 @@ typedef struct __attribute__((packed)) {
 
 ### IMGF图像帧 (PNG地图数据)
 - 直接传输PNG格式的图像数据
-- 支持最大128KB的图像大小
 - 采用零拷贝技术优化性能
 
 ## 🚀 快速开始
@@ -343,4 +280,5 @@ Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
 
 ---
 > Made with ❤️ for embedded automotive applications*
+
 > *⚠️ 本项目完全由AI生成和构建*
