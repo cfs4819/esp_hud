@@ -99,6 +99,8 @@ typedef struct __attribute__((packed)) {
 | 16 | 2 | int16 | 电池电压(mV) |
 | 18 | 2 | uint16 | 当前时间(分钟数) |
 | 20 | 2 | uint16 | 行程时间(分钟) |
+| 22 | 2 | uint16 | 油箱余量(0.1L) |
+| 24 | 2 | uint16 | 油箱总量(0.1L) |
 
 ### IMGF图像帧 (PNG地图数据)
 - 直接传输PNG格式的图像数据

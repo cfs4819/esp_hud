@@ -24,6 +24,8 @@ int16  inside_temp_c
 int16  battery_mv
 uint16 curr_time_min   // 0..1439（HH:MM -> 分钟数）
 uint16 trip_time_min   // 行程分钟数
+uint16 fuel_left_dl    // 油箱余量，单位0.1L
+uint16 fuel_total_dl   // 油箱总量，单位0.1L
 ... reserve(可选)
 
 依赖：
@@ -31,6 +33,7 @@ pip install pyserial pillow
 """
 
 import argparse
+import random
 import struct
 import time
 import requests
@@ -115,11 +118,13 @@ class MsgfSnapshot:
     battery_mv: int = 12000
     curr_time_min: int = 0       # 0..1439
     trip_time_min: int = 0       # >=0
+    fuel_left_dl: int = 0        # 油箱余量，单位0.1L
+    fuel_total_dl: int = 0       # 油箱总量，单位0.1L
 
     def pack(self) -> bytes:
-        # < h h i i h h h H H  = 2+2+4+4+2+2+2+2+2 = 22 bytes
+        # < h h i i h h h H H H H = 2+2+4+4+2+2+2+2+2+2+2 = 26 bytes
         return struct.pack(
-            "<hhiihhhHH",
+            "<hhiihhhHHHH",
             int(self.speed_kmh),
             int(self.engine_rpm),
             int(self.odo_m),
@@ -129,6 +134,8 @@ class MsgfSnapshot:
             int(self.battery_mv),
             int(self.curr_time_min) & 0xFFFF,
             int(self.trip_time_min) & 0xFFFF,
+            int(self.fuel_left_dl) & 0xFFFF,
+            int(self.fuel_total_dl) & 0xFFFF,
         )
 
 
@@ -211,9 +218,14 @@ def run_demo(
     rpm = 1800
     odo = 123_000
     trip = 12_340
-    out_t = 5
+    out_t = 50
     in_t = 22
-    batt = 12150
+    batt = 14200
+    fuel_total_dl = 520  # 52.0L，固定油箱容量
+    fuel_left_dl = 360   # 36.0L
+    out_t_target = random.randint(-200, 280)  # 单位 0.1°C
+    next_temp_tick = time.time()
+    next_batt_tick = time.time()
 
     t0 = time.time()
     last = time.time()
@@ -228,11 +240,26 @@ def run_demo(
         trip_min = int((now - t0) // 60)
 
         # 做一点随机抖动（可替换为真实数据源）
-        # 为了不引入 random，这里用时间相位做伪变化
         speed = max(0, min(132, speed + (1 if int(now*2) % 7 == 0 else 0) - (1 if int(now*3) % 11 == 0 else 0)))
         rpm = max(0, min(8000, rpm + (50 if int(now*5) % 13 == 0 else 0) - (50 if int(now*7) % 17 == 0 else 0)))
         odo += max(0, speed)  # 粗略累加
         trip += max(0, speed)
+
+        # 外温缓慢变化：每秒变动 0.1°C，范围 -20.0~+28.0°C
+        if now >= next_temp_tick:
+            if abs(out_t - out_t_target) <= 1:
+                out_t_target = random.randint(-200, 280)
+            out_t += 1 if out_t_target > out_t else -1
+            out_t = max(-200, min(280, out_t))
+            next_temp_tick = now + 1.0
+
+        # 电池电压随机变化：13.8V~14.7V（单位 mV）
+        if now >= next_batt_tick:
+            batt = random.randint(13800, 14700)
+            next_batt_tick = now + 0.5
+
+        # 演示用：每秒按0.1L缓慢消耗，降到0后循环回满箱
+        fuel_left_dl = fuel_left_dl - 1 if fuel_left_dl > 0 else fuel_total_dl
 
         snap = MsgfSnapshot(
             speed_kmh=speed,
@@ -244,8 +271,15 @@ def run_demo(
             battery_mv=batt,
             curr_time_min=curr_min,
             trip_time_min=trip_min,
+            fuel_left_dl=fuel_left_dl,
+            fuel_total_dl=fuel_total_dl,
         )
-        print(f" Sent MSGF {speed:03.0f} {rpm:04.0f} {odo:08.0f} {trip:08.0f} {out_t:02.0f} {in_t:02.0f} {batt:02.0f} {curr_min:04d} {trip_min:04d}", end="\r")
+        print(
+            f" Sent MSGF {speed:03d} {rpm:04d} {odo:08d} {trip:08d} "
+            f"out={out_t/10:+05.1f}C in={in_t:02d}C batt={batt/1000:.2f}V "
+            f"{curr_min:04d} {trip_min:04d} {fuel_left_dl/10:.1f}/{fuel_total_dl/10:.1f}",
+            end="\r",
+        )
         sender.send_msgf(snap)
         
         # 原有：本地 PNG demo
@@ -287,7 +321,7 @@ def run_demo(
 
 
 def run_once(sender: HostSender, speed: int, rpm: int, odo: int, trip: int, out_t: int, in_t: int, batt: int,
-             curr_time: str, trip_min: int, png_path: Optional[str], img_mode: str,
+             curr_time: str, trip_min: int, fuel_left: float, fuel_total: float, png_path: Optional[str], img_mode: str,
              img_w: Optional[int], img_h: Optional[int], r565_swap_bytes: bool):
     snap = MsgfSnapshot(
         speed_kmh=speed,
@@ -299,6 +333,8 @@ def run_once(sender: HostSender, speed: int, rpm: int, odo: int, trip: int, out_
         battery_mv=batt,
         curr_time_min=hhmm_to_minutes(curr_time),
         trip_time_min=trip_min,
+        fuel_left_dl=int(round(fuel_left * 10)),
+        fuel_total_dl=int(round(fuel_total * 10)),
     )
     sender.send_msgf(snap)
     if png_path:
@@ -343,6 +379,8 @@ def main():
     ap.add_argument("--batt", type=int, default=12150)
     ap.add_argument("--time", type=str, default="12:34", help="当前时间 HH:MM（once 模式）")
     ap.add_argument("--trip-min", type=int, default=0, help="行程分钟数（once 模式）")
+    ap.add_argument("--fuel-left", type=float, default=36.0, help="油箱余量，单位L（once 模式）")
+    ap.add_argument("--fuel-total", type=float, default=52.0, help="油箱总量，单位L（once 模式）")
 
     args = ap.parse_args()
 
@@ -440,7 +478,7 @@ def main():
         else:
             run_once(sender, args.speed, args.rpm, args.odo, args.trip,
                     args.out_t, args.in_t, args.batt,
-                    args.time, args.trip_min, args.png, args.img_mode, args.img_w, args.img_h,
+                    args.time, args.trip_min, args.fuel_left, args.fuel_total, args.png, args.img_mode, args.img_w, args.img_h,
                     args.r565_swap_bytes)
     finally:
         sender.close()

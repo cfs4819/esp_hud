@@ -25,7 +25,9 @@ Message 结构
     16      2      int16     battery_mv
     18      2      uint16    curr_time_min   // 0..1439
     20      2      uint16    trip_time_min
-    22      ...    reserve
+    22      2      uint16    fuel_left_dl    // 油箱余量(0.1L)
+    24      2      uint16    fuel_total_dl   // 油箱总量(0.1L)
+    26      ...    reserve
 */
 
 typedef struct {
@@ -38,6 +40,8 @@ typedef struct {
     int16_t  batt_mv;
     uint16_t cur_time_min;
     uint16_t trip_time_min;
+    uint16_t fuel_left_dl;
+    uint16_t fuel_total_dl;
 } ui_snapshot_t;
 
 /* ---------- PNG项结构（零拷贝方案）---------- */
@@ -87,7 +91,7 @@ static void set_time_label(lv_obj_t *label, uint16_t min)
 static void apply_snapshot_lvgl(const ui_snapshot_t *s)
 {
     /* 速度 */
-    char buf[8];
+    char buf[16];
     snprintf(buf, sizeof(buf), "%d", (int)s->speed);
     lv_label_set_text(ui_Speed_Number_1, buf);
     lv_label_set_text(ui_Speed_Number_2, buf);
@@ -103,8 +107,32 @@ static void apply_snapshot_lvgl(const ui_snapshot_t *s)
     set_time_label(ui_Label_Time3,  s->cur_time_min);
     set_time_label(ui_Label_Time_Trip, s->trip_time_min);
 
-    /* 其余字段（ODO / 温度 / 电量）
-       你后面接 UI 时直接加，不用再改协议 */
+    /* 油量：0.1L -> 整数L，格式 left/total */
+    int fuel_left_l = (int)(s->fuel_left_dl / 10U);
+    int fuel_total_l = (int)(s->fuel_total_dl / 10U);
+    snprintf(buf, sizeof(buf), "%d/%d", fuel_left_l, fuel_total_l);
+    lv_label_set_text(ui_Label_Gas_Number, buf);
+
+    /* ODO：米 -> 公里，1位小数 */
+    char big_buf[24];
+    float odo_km = (float)s->odo / 1000.0f;
+    snprintf(big_buf, sizeof(big_buf), "%.1f", (double)odo_km);
+    lv_label_set_text(ui_Label_ODO_Number1, big_buf);
+
+    /* Trip ODO：米 -> 公里，1位小数 */
+    float trip_odo_km = (float)s->trip_odo / 1000.0f;
+    snprintf(big_buf, sizeof(big_buf), "%.1f", (double)trip_odo_km);
+    lv_label_set_text(ui_Label_Trip_Odo, big_buf);
+
+    /* 室外温度：0.1°C -> ±xx.x */
+    float out_temp_c = (float)s->out_temp / 10.0f;
+    snprintf(big_buf, sizeof(big_buf), "%+.1f", (double)out_temp_c);
+    lv_label_set_text(ui_Label_Temp2, big_buf);
+
+    /* 电池电压：mV -> V，1位小数 */
+    float batt_v = (float)s->batt_mv / 1000.0f;
+    snprintf(big_buf, sizeof(big_buf), "%.1f", (double)batt_v);
+    lv_label_set_text(ui_Label_Battery_Number1, big_buf);
 }
 
 /* ---------- PNG处理（零拷贝版本）---------- */
@@ -172,6 +200,12 @@ void ui_request_msg(const uint8_t *d, size_t len, uint32_t seq)
     ev.snap.batt_mv      = (int16_t)(d[16] | (d[17]<<8));
     ev.snap.cur_time_min = (uint16_t)(d[18] | (d[19]<<8));
     ev.snap.trip_time_min= (uint16_t)(d[20] | (d[21]<<8));
+    ev.snap.fuel_left_dl = 0;
+    ev.snap.fuel_total_dl= 0;
+    if (len >= 26) {
+        ev.snap.fuel_left_dl = (uint16_t)(d[22] | (d[23] << 8));
+        ev.snap.fuel_total_dl= (uint16_t)(d[24] | (d[25] << 8));
+    }
 
     // 仪表语义：只关心最新状态，覆盖旧快照
     xQueueOverwrite(s_msg_q, &ev);
