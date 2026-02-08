@@ -1,6 +1,7 @@
 #include "ui_bridge.h"
 
 #include <Arduino.h>
+#include <stdlib.h>
 #include <string.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -8,6 +9,9 @@
 #include <lvgl.h>
 #include "ui.h"
 #include "squareline/ui_Home.h"
+#if __has_include("esp_heap_caps.h")
+#include "esp_heap_caps.h"
+#endif
 
 extern "C" {
 
@@ -72,10 +76,78 @@ typedef struct {
 static QueueHandle_t s_msg_q = nullptr;  // MSG队列 - 用于快速的小数据
 static QueueHandle_t s_img_q = nullptr;  // IMG队列 - 用于慢速的大数据
 
-// 当前正在被lv_img对象引用的PNG buffer信息
-static bool s_active_png_valid = false;
-static int s_active_png_token = -1;
-static void (*s_active_png_release_cb)(int) = nullptr;
+// 当前正在被lv_img对象引用的RGB565位图
+static uint8_t *s_map_rgb565 = nullptr;
+
+static void *ui_alloc(size_t n)
+{
+#if __has_include("esp_heap_caps.h")
+    void *p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (p) return p;
+    return heap_caps_malloc(n, MALLOC_CAP_8BIT);
+#else
+    return malloc(n);
+#endif
+}
+
+static void ui_free(void *p)
+{
+#if __has_include("esp_heap_caps.h")
+    heap_caps_free(p);
+#else
+    free(p);
+#endif
+}
+
+static bool decode_png_to_rgb565(const uint8_t *png, size_t len, uint8_t **out_rgb, size_t *out_bytes, lv_coord_t *out_w, lv_coord_t *out_h)
+{
+    if (!png || !len || !out_rgb || !out_bytes || !out_w || !out_h) return false;
+
+    lv_img_dsc_t src = {};
+    src.header.always_zero = 0;
+    src.header.w = 0;
+    src.header.h = 0;
+    src.header.cf = 0;
+    src.data_size = len;
+    src.data = png;
+
+    lv_img_decoder_dsc_t dec = {};
+    lv_res_t res = lv_img_decoder_open(&dec, &src, lv_color_black(), 0);
+    if (res != LV_RES_OK || dec.header.w <= 0 || dec.header.h <= 0 || !dec.img_data) {
+        lv_img_decoder_close(&dec);
+        return false;
+    }
+
+    const uint32_t px_cnt = (uint32_t)dec.header.w * (uint32_t)dec.header.h;
+    const size_t out_sz = (size_t)px_cnt * sizeof(lv_color_t);
+    uint8_t *rgb = (uint8_t *)ui_alloc(out_sz);
+    if (!rgb) {
+        lv_img_decoder_close(&dec);
+        return false;
+    }
+
+    if (dec.header.cf == LV_IMG_CF_TRUE_COLOR_ALPHA) {
+        // LV_COLOR_DEPTH=16时，PNG解码后像素布局为: [c_low, c_high, alpha]
+        for (uint32_t i = 0; i < px_cnt; ++i) {
+            rgb[i * 2 + 0] = dec.img_data[i * 3 + 0];
+            rgb[i * 2 + 1] = dec.img_data[i * 3 + 1];
+        }
+    } else if (dec.header.cf == LV_IMG_CF_TRUE_COLOR) {
+        memcpy(rgb, dec.img_data, out_sz);
+    } else {
+        ui_free(rgb);
+        lv_img_decoder_close(&dec);
+        return false;
+    }
+
+    *out_rgb = rgb;
+    *out_bytes = out_sz;
+    *out_w = dec.header.w;
+    *out_h = dec.header.h;
+
+    lv_img_decoder_close(&dec);
+    return true;
+}
 
 /* ---------- LVGL 内部工具 ---------- */
 
@@ -135,37 +207,42 @@ static void apply_snapshot_lvgl(const ui_snapshot_t *s)
     lv_label_set_text(ui_Label_Battery_Number1, big_buf);
 }
 
-/* ---------- PNG处理（零拷贝版本）---------- */
+/* ---------- PNG处理（一次解码转RGB565）---------- */
 
 static void apply_png_lvgl(const png_item_t *it)
 {
+    uint8_t *new_rgb = nullptr;
+    size_t new_bytes = 0;
+    lv_coord_t new_w = 0;
+    lv_coord_t new_h = 0;
+
+    const bool ok = decode_png_to_rgb565(it->png, it->len, &new_rgb, &new_bytes, &new_w, &new_h);
+
+    // PNG原始buffer只在当前函数解码时使用，随后即可释放
+    if (it->release_cb) {
+        it->release_cb(it->token);
+    }
+
+    if (!ok) {
+        Serial0.println("[UI_BRIDGE] PNG decode failed, keep previous map");
+        return;
+    }
+
     static lv_img_dsc_t img_dsc;
     img_dsc.header.always_zero = 0;
-    img_dsc.header.w = 0;
-    img_dsc.header.h = 0;
-    img_dsc.header.cf = LV_IMG_CF_RAW_ALPHA;
-    img_dsc.data_size = it->len;
-    img_dsc.data = it->png;
+    img_dsc.header.w = new_w;
+    img_dsc.header.h = new_h;
+    img_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
+    img_dsc.data_size = new_bytes;
+    img_dsc.data = new_rgb;
 
-    // 同一img_dsc地址承载不同PNG数据时，先失效缓存，避免读到旧解码结果
     lv_img_cache_invalidate_src(&img_dsc);
     lv_img_set_src(ui_Map_Bg, &img_dsc);
-    
-    // 新图切换成功后，释放上一张仍被对象持有的buffer
-    if (s_active_png_valid && s_active_png_release_cb) {
-        s_active_png_release_cb(s_active_png_token);
-    }
 
-    // 记录当前图对应的buffer，直到下一次替换时再释放
-    if (it->release_cb) {
-        s_active_png_valid = true;
-        s_active_png_token = it->token;
-        s_active_png_release_cb = it->release_cb;
-    } else {
-        s_active_png_valid = false;
-        s_active_png_token = -1;
-        s_active_png_release_cb = nullptr;
+    if (s_map_rgb565) {
+        ui_free(s_map_rgb565);
     }
+    s_map_rgb565 = new_rgb;
 }
 
 /* ---------- API ---------- */
@@ -247,7 +324,7 @@ void ui_request_set_png(const uint8_t *png,
     else {
         Serial0.println("[UI_BRIDGE] PNG queued successfully");
     }
-    // 注意：这里不调用release_cb，让LVGL线程在使用完后释放
+    // 注意：release_cb在LVGL线程里解码完成后立即调用
 }
 
 void ui_bridge_apply_pending(void)
