@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 #include <lvgl.h>
+#include "freertos/task.h"
 
 #include "PanelLan.h"
 #include "ui.h"
@@ -23,6 +24,9 @@ static lv_color_t *buf2 = nullptr;
 static const uint32_t draw_buf_pixels = screenWidth * screenHeight;
 static lv_color_t fallback_buf1[screenWidth * 40];
 static lv_color_t fallback_buf2[screenWidth * 40];
+static TaskHandle_t s_lvgl_task_handle = nullptr;
+static volatile bool s_suspend_requested = false;
+static volatile bool s_is_suspended = false;
 
 /* Display flushing */
 static void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
@@ -63,6 +67,26 @@ static void lvgl_task(void *param)
     const TickType_t delayTicks = pdMS_TO_TICKS(5);
 
     for (;;) {
+        if (s_suspend_requested) {
+            if (!s_is_suspended) {
+                lv_timer_enable(false);
+                if (tft.getStartCount() > 0) {
+                    tft.endWrite();
+                }
+                tft.sleep();
+                s_is_suspended = true;
+            }
+
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+            if (!s_suspend_requested && s_is_suspended) {
+                tft.wakeup();
+                lv_timer_enable(true);
+                s_is_suspended = false;
+            }
+            continue;
+        }
+
         // 处理 UI 更新请求（你未来 CDC/router/PNG decode 都通过桥接发到这里）
         lvgl_port_poll_ui();
 
@@ -136,7 +160,7 @@ void lvgl_port_init(void)
         6144,
         nullptr,
         8,
-        nullptr,
+        &s_lvgl_task_handle,
         1
     );
 }
@@ -145,4 +169,33 @@ void lvgl_port_poll_ui(void)
 {
     // 把业务线程发来的“更新请求”应用到 LVGL 对象（只在 LVGL 线程内执行）
     ui_bridge_apply_pending();
+}
+
+void lvgl_port_suspend(void)
+{
+    if (!s_lvgl_task_handle || s_is_suspended) {
+        return;
+    }
+    s_suspend_requested = true;
+    xTaskNotifyGive(s_lvgl_task_handle);
+    while (!s_is_suspended) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+void lvgl_port_resume(void)
+{
+    if (!s_lvgl_task_handle || !s_is_suspended) {
+        return;
+    }
+    s_suspend_requested = false;
+    xTaskNotifyGive(s_lvgl_task_handle);
+    while (s_is_suspended) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+bool lvgl_port_is_suspended(void)
+{
+    return s_is_suspended;
 }

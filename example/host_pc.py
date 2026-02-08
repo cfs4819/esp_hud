@@ -15,6 +15,9 @@ crc32 u32   // 本脚本默认不启用（0）
 seq  u32
 
 短消息 MSGF payload（小端）：
+uint8  cmd
+  - 0x00: 状态快照，后续字段与旧协议一致
+  - 0x01: 设备重启（后续可无payload）
 int16  speed_kmh
 int16  engine_speed_rpm
 int32  odo_m
@@ -49,6 +52,8 @@ MAX_PNG_SIZE = 200 * 1024  # 200KB
 
 MAGIC_MSGF = b"MSGF"
 MAGIC_IMGF = b"IMGF"
+MSG_CMD_SNAPSHOT = 0x00
+MSG_CMD_REBOOT = 0x01
 
 
 def u32_le_from_magic(magic4: bytes) -> int:
@@ -157,8 +162,13 @@ class HostSender:
         self.ser.write(payload)
         self.seq += 1
 
-    def send_msgf(self, snap: MsgfSnapshot):
-        self.send_frame(MAGIC_MSGF, snap.pack())
+    def send_msgf(self, snap: MsgfSnapshot, cmd: int = MSG_CMD_SNAPSHOT):
+        payload = struct.pack("<B", cmd & 0xFF) + snap.pack()
+        self.send_frame(MAGIC_MSGF, payload)
+
+    def send_msgf_cmd_only(self, cmd: int):
+        payload = struct.pack("<B", cmd & 0xFF)
+        self.send_frame(MAGIC_MSGF, payload)
 
     def send_imgf(self, png_path: str):
         with open(png_path, "rb") as f:
@@ -280,7 +290,7 @@ def run_demo(
             f"{curr_min:04d} {trip_min:04d} {fuel_left_dl/10:.1f}/{fuel_total_dl/10:.1f}",
             end="\r",
         )
-        sender.send_msgf(snap)
+        sender.send_msgf(snap, cmd=MSG_CMD_SNAPSHOT)
         
         # 原有：本地 PNG demo
         if now >= next_png and png_path:
@@ -322,7 +332,7 @@ def run_demo(
 
 def run_once(sender: HostSender, speed: int, rpm: int, odo: int, trip: int, out_t: int, in_t: int, batt: int,
              curr_time: str, trip_min: int, fuel_left: float, fuel_total: float, png_path: Optional[str], img_mode: str,
-             img_w: Optional[int], img_h: Optional[int], r565_swap_bytes: bool):
+             img_w: Optional[int], img_h: Optional[int], r565_swap_bytes: bool, reboot_cmd: bool):
     snap = MsgfSnapshot(
         speed_kmh=speed,
         engine_rpm=rpm,
@@ -336,7 +346,9 @@ def run_once(sender: HostSender, speed: int, rpm: int, odo: int, trip: int, out_
         fuel_left_dl=int(round(fuel_left * 10)),
         fuel_total_dl=int(round(fuel_total * 10)),
     )
-    sender.send_msgf(snap)
+    sender.send_msgf(snap, cmd=MSG_CMD_SNAPSHOT)
+    if reboot_cmd:
+        sender.send_msgf_cmd_only(MSG_CMD_REBOOT)
     if png_path:
         with open(png_path, "rb") as f:
             png = f.read()
@@ -381,6 +393,7 @@ def main():
     ap.add_argument("--trip-min", type=int, default=0, help="行程分钟数（once 模式）")
     ap.add_argument("--fuel-left", type=float, default=36.0, help="油箱余量，单位L（once 模式）")
     ap.add_argument("--fuel-total", type=float, default=52.0, help="油箱总量，单位L（once 模式）")
+    ap.add_argument("--reboot-cmd", action="store_true", help="once模式额外发送CMD=0x01重启命令")
 
     args = ap.parse_args()
 
@@ -479,7 +492,7 @@ def main():
             run_once(sender, args.speed, args.rpm, args.odo, args.trip,
                     args.out_t, args.in_t, args.batt,
                     args.time, args.trip_min, args.fuel_left, args.fuel_total, args.png, args.img_mode, args.img_w, args.img_h,
-                    args.r565_swap_bytes)
+                    args.r565_swap_bytes, args.reboot_cmd)
     finally:
         sender.close()
 

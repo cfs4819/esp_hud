@@ -108,6 +108,8 @@ static void rx_task_fn(void *arg)
             continue;
 
         r->st.bytes_rx += (uint64_t)n;
+        if (r->cfg.on_rx_activity)
+            r->cfg.on_rx_activity(r->cfg.on_rx_activity_user, (size_t)n);
 
         int off = 0;
         while (off < n)
@@ -208,6 +210,8 @@ static void rx_task_fn(void *arg)
                         if (nn <= 0)
                             continue;
                         r->st.bytes_rx += (uint64_t)nn;
+                        if (r->cfg.on_rx_activity)
+                            r->cfg.on_rx_activity(r->cfg.on_rx_activity_user, (size_t)nn);
 
                         int oo = 0;
                         while (oo < nn && pay_got < hdr.len)

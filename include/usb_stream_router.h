@@ -64,6 +64,8 @@ extern "C"
         int rx_task_core;     /* -1 no pin */
         int read_chunk;       /* e.g. 8192 */
         int max_receivers;    /* e.g. 4 */
+        void (*on_rx_activity)(void *user, size_t bytes);
+        void *on_rx_activity_user;
     } usb_sr_config_t;
 
     typedef struct usb_stream_router usb_stream_router_t;
