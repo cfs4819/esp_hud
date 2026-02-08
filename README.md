@@ -14,6 +14,10 @@ ESP_HUD是一个基于ESP32-S3的抬头显示器(HUD)项目，专为车载应用
 
 所有数据经过高效解析后，通过LVGL图形库渲染显示在480×320的彩色显示屏上，为驾驶员提供直观的行车信息展示。
 
+<div align="center">
+  <img src="doc/image_demo.png" alt="ESP_HUD演示效果" width="75%">
+</div>
+
 ## 🏗️ 系统架构
 
 ### 核心组件架构图
