@@ -36,18 +36,20 @@ pip install pyserial pillow
 """
 
 import argparse
+import json
 import random
 import struct
 import time
 import requests
 import io
+import os
 from dataclasses import dataclass
 from typing import Optional, List
 
 import serial
 from PIL import Image
 
-TRACK_URL = "http://43.128.232.127:8123/track/image"
+TRACK_URL = "http://azurehk.crazythursdayvivo50.cn:8123/track/image"
 MAX_PNG_SIZE = 200 * 1024  # 200KB
 
 MAGIC_MSGF = b"MSGF"
@@ -79,8 +81,10 @@ def hhmm_to_minutes(hhmm: str) -> int:
 
 
 class TrackImageFetcher:
-    def __init__(self, points: List[List[float]]):
+    def __init__(self, points: List[List[float]], track_url: str, basic_auth: Optional[tuple[str, str]] = None):
         self.points = points
+        self.track_url = track_url
+        self.basic_auth = basic_auth
         self.count = 0
 
     def fetch_next(self) -> bytes:
@@ -96,9 +100,10 @@ class TrackImageFetcher:
         }
 
         resp = requests.post(
-            TRACK_URL,
+            self.track_url,
             json=body,
             headers=header,
+            auth=self.basic_auth,
             timeout=10,
         )
         resp.raise_for_status()
@@ -362,6 +367,24 @@ def run_once(sender: HostSender, speed: int, rpm: int, odo: int, trip: int, out_
         else:
             sender.send_imgf_bytes(png)
 
+def parse_basic_auth_from_env() -> Optional[tuple[str, str]]:
+    raw = os.getenv("BASIC_AUTH_USERS")
+    if not raw:
+        return None
+    try:
+        auth = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("BASIC_AUTH_USERS is not valid JSON") from exc
+
+    if not isinstance(auth, dict):
+        raise ValueError("BASIC_AUTH_USERS must be a JSON object")
+
+    user = auth.get("user") or auth.get("username")
+    passwd = auth.get("passwd") or auth.get("password")
+    if not user or not passwd:
+        raise ValueError("BASIC_AUTH_USERS must include user/passwd")
+    return str(user), str(passwd)
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -400,6 +423,9 @@ def main():
     sender = HostSender(args.port, args.baud)
     fetcher = None
     if args.track:
+        basic_auth = parse_basic_auth_from_env()
+        if basic_auth is None:
+            raise ValueError("BASIC_AUTH_USERS env is required when --track is enabled")
         TRACK_POINTS = [
             [121.154031, 31.157299],
             [121.154365, 31.155985],
@@ -473,7 +499,7 @@ def main():
             [120.974736, 31.077291],
             [120.983928, 31.076962]
         ]
-        fetcher = TrackImageFetcher(TRACK_POINTS)
+        fetcher = TrackImageFetcher(TRACK_POINTS, TRACK_URL, basic_auth=basic_auth)
     try:
         if args.mode == "demo":
             run_demo(
