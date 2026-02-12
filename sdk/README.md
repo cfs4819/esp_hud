@@ -134,7 +134,7 @@ sdk.close();
 `MapImageProvider`（需要地图时必须实现，或使用默认实现）：
 
 - `byte[] fetchTrackImage(List<GpsPoint> points)`
-  - 参数: 去重过滤后的轨迹点列表（时间升序）。
+  - 参数: 去重过滤后的轨迹点列表（时间升序，至少两个点）。
   - 返回: PNG 字节数组（非空）。
   - 异常: 请求或渲染失败可抛异常，SDK 会按退避策略重试。
 

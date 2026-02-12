@@ -50,7 +50,7 @@ public interface MapImageProvider {
     /**
      * 根据轨迹点列表生成 PNG 图片。
      *
-     * @param points 轨迹点列表，按时间升序，至少包含一个点
+     * @param points 轨迹点列表，按时间升序，至少包含两个点
      * @return PNG 字节数组；返回 {@code null} 或空数组会被 SDK 视为无效结果
      * @throws Exception 地图请求、渲染或编码失败时抛出
      */

@@ -347,7 +347,8 @@ public final class HudHostSdk implements AutoCloseable {
             if (lastAcceptedPoint != null) {
                 double d = distanceMeters(lastAcceptedPoint.latitude, lastAcceptedPoint.longitude, point.latitude, point.longitude);
                 boolean turnKeep = shouldKeepTurnPoint(lastAcceptedPoint, point, d);
-                if (d < config.gpsMinDistanceM && !turnKeep) {
+                boolean bypassMinDistanceForBootstrap = track.size() < 2;
+                if (!bypassMinDistanceForBootstrap && d < config.gpsMinDistanceM && !turnKeep) {
                     emitGpsFiltered(point, "distance<" + config.gpsMinDistanceM + "m");
                     return;
                 }
@@ -403,7 +404,7 @@ public final class HudHostSdk implements AutoCloseable {
     }
 
     private void maybeTriggerMapFetchLocked(long nowMs) {
-        if (mapImageProvider == null || track.isEmpty()) {
+        if (mapImageProvider == null || track.size() < 2) {
             return;
         }
         if (nowMs < nextMapRetryAtMs) {
