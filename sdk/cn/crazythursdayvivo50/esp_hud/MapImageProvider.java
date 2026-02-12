@@ -12,7 +12,7 @@ public interface MapImageProvider {
      * 创建默认 HTTP 轨迹图提供器。
      * <p>
      * 默认参数对齐 Python 示例：
-     * URL=`http://azurehk.crazythursdayvivo50.cn:8123/track/image`，超时 10 秒，最大图片 200KB。
+     * URL=`https://azurehk.crazythursdayvivo50.cn/trace/track/image`，超时 10 秒，最大图片 200KB。
      *
      * @return 默认 HTTP 提供器实例
      */

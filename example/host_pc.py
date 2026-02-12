@@ -49,7 +49,7 @@ from typing import Optional, List
 import serial
 from PIL import Image
 
-TRACK_URL = "http://azurehk.crazythursdayvivo50.cn:8123/track/image"
+TRACK_URL = "https://azurehk.crazythursdayvivo50.cn/trace/track/image"
 MAX_PNG_SIZE = 200 * 1024  # 200KB
 
 MAGIC_MSGF = b"MSGF"
@@ -369,6 +369,7 @@ def run_once(sender: HostSender, speed: int, rpm: int, odo: int, trip: int, out_
 
 def parse_basic_auth_from_env() -> Optional[tuple[str, str]]:
     raw = os.getenv("BASIC_AUTH_USERS")
+    print('raw: ', raw)
     if not raw:
         return None
     try:

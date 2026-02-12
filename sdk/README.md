@@ -141,7 +141,7 @@ sdk.close();
 默认实现（对齐 Python 示例）：
 
 - `MapImageProvider.defaultProvider()`
-  - 请求地址：`http://azurehk.crazythursdayvivo50.cn:8123/track/image`
+  - 请求地址：`https://azurehk.crazythursdayvivo50.cn/trace/track/image`
   - 请求方法：`POST`
   - 请求头：`Content-Type: application/json`，`accept: application/json`，可选 `Authorization: Basic ...`
   - 请求体：`{"points":[[lon,lat], ...]}`

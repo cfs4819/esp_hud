@@ -76,8 +76,8 @@ typedef struct {
 static QueueHandle_t s_msg_q = nullptr;  // MSG队列 - 用于快速的小数据
 static QueueHandle_t s_img_q = nullptr;  // IMG队列 - 用于慢速的大数据
 
-// 当前正在被lv_img对象引用的RGB565位图
-static uint8_t *s_map_rgb565 = nullptr;
+// 当前正在被 lv_img 对象引用的位图数据（TRUE_COLOR 或 TRUE_COLOR_ALPHA）
+static uint8_t *s_map_img_buf = nullptr;
 
 static void *ui_alloc(size_t n)
 {
@@ -99,9 +99,15 @@ static void ui_free(void *p)
 #endif
 }
 
-static bool decode_png_to_rgb565(const uint8_t *png, size_t len, uint8_t **out_rgb, size_t *out_bytes, lv_coord_t *out_w, lv_coord_t *out_h)
+static bool decode_png_to_lv_img_data(const uint8_t *png,
+                                      size_t len,
+                                      uint8_t **out_data,
+                                      size_t *out_bytes,
+                                      lv_coord_t *out_w,
+                                      lv_coord_t *out_h,
+                                      lv_img_cf_t *out_cf)
 {
-    if (!png || !len || !out_rgb || !out_bytes || !out_w || !out_h) return false;
+    if (!png || !len || !out_data || !out_bytes || !out_w || !out_h || !out_cf) return false;
 
     lv_img_dsc_t src = {};
     src.header.always_zero = 0;
@@ -118,32 +124,29 @@ static bool decode_png_to_rgb565(const uint8_t *png, size_t len, uint8_t **out_r
         return false;
     }
 
-    const uint32_t px_cnt = (uint32_t)dec.header.w * (uint32_t)dec.header.h;
-    const size_t out_sz = (size_t)px_cnt * sizeof(lv_color_t);
-    uint8_t *rgb = (uint8_t *)ui_alloc(out_sz);
-    if (!rgb) {
-        lv_img_decoder_close(&dec);
-        return false;
-    }
-
+    lv_img_cf_t out_cf_local = 0;
     if (dec.header.cf == LV_IMG_CF_TRUE_COLOR_ALPHA) {
-        // LV_COLOR_DEPTH=16时，PNG解码后像素布局为: [c_low, c_high, alpha]
-        for (uint32_t i = 0; i < px_cnt; ++i) {
-            rgb[i * 2 + 0] = dec.img_data[i * 3 + 0];
-            rgb[i * 2 + 1] = dec.img_data[i * 3 + 1];
-        }
+        out_cf_local = LV_IMG_CF_TRUE_COLOR_ALPHA;
     } else if (dec.header.cf == LV_IMG_CF_TRUE_COLOR) {
-        memcpy(rgb, dec.img_data, out_sz);
+        out_cf_local = LV_IMG_CF_TRUE_COLOR;
     } else {
-        ui_free(rgb);
         lv_img_decoder_close(&dec);
         return false;
     }
 
-    *out_rgb = rgb;
+    const size_t out_sz = (size_t)lv_img_buf_get_img_size(dec.header.w, dec.header.h, out_cf_local);
+    uint8_t *buf = (uint8_t *)ui_alloc(out_sz);
+    if (!buf) {
+        lv_img_decoder_close(&dec);
+        return false;
+    }
+    memcpy(buf, dec.img_data, out_sz);
+
+    *out_data = buf;
     *out_bytes = out_sz;
     *out_w = dec.header.w;
     *out_h = dec.header.h;
+    *out_cf = out_cf_local;
 
     lv_img_decoder_close(&dec);
     return true;
@@ -211,12 +214,13 @@ static void apply_snapshot_lvgl(const ui_snapshot_t *s)
 
 static void apply_png_lvgl(const png_item_t *it)
 {
-    uint8_t *new_rgb = nullptr;
+    uint8_t *new_data = nullptr;
     size_t new_bytes = 0;
     lv_coord_t new_w = 0;
     lv_coord_t new_h = 0;
+    lv_img_cf_t new_cf = LV_IMG_CF_TRUE_COLOR;
 
-    const bool ok = decode_png_to_rgb565(it->png, it->len, &new_rgb, &new_bytes, &new_w, &new_h);
+    const bool ok = decode_png_to_lv_img_data(it->png, it->len, &new_data, &new_bytes, &new_w, &new_h, &new_cf);
 
     // PNG原始buffer只在当前函数解码时使用，随后即可释放
     if (it->release_cb) {
@@ -232,17 +236,17 @@ static void apply_png_lvgl(const png_item_t *it)
     img_dsc.header.always_zero = 0;
     img_dsc.header.w = new_w;
     img_dsc.header.h = new_h;
-    img_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
+    img_dsc.header.cf = new_cf;
     img_dsc.data_size = new_bytes;
-    img_dsc.data = new_rgb;
+    img_dsc.data = new_data;
 
     lv_img_cache_invalidate_src(&img_dsc);
     lv_img_set_src(ui_Map_Bg, &img_dsc);
 
-    if (s_map_rgb565) {
-        ui_free(s_map_rgb565);
+    if (s_map_img_buf) {
+        ui_free(s_map_img_buf);
     }
-    s_map_rgb565 = new_rgb;
+    s_map_img_buf = new_data;
 }
 
 /* ---------- API ---------- */

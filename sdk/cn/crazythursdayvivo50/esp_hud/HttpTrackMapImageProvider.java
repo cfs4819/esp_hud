@@ -18,7 +18,7 @@ import java.util.List;
  */
 public final class HttpTrackMapImageProvider implements MapImageProvider {
     /** 与 Python 示例一致的默认接口地址。 */
-    public static final String DEFAULT_URL = "http://azurehk.crazythursdayvivo50.cn:8123/track/image";
+    public static final String DEFAULT_URL = "https://azurehk.crazythursdayvivo50.cn/trace/track/image";
     /** 与 Python 示例一致的默认超时（毫秒）。 */
     public static final int DEFAULT_TIMEOUT_MS = 10_000;
     /** 与 Python 示例一致的默认最大图片大小（字节）。 */
