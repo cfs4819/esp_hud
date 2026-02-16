@@ -39,6 +39,55 @@ public interface HudSdkListener {
     default void onGpsPointFiltered(GpsPoint point, String reason) {}
 
     /**
+     * 地图拉取开始事件。
+     *
+     * @param pointCount 参与拉取的轨迹点数
+     * @param firstTimestampMs 首点时间戳（毫秒）
+     * @param lastTimestampMs 末点时间戳（毫秒）
+     */
+    default void onMapFetchStart(int pointCount, long firstTimestampMs, long lastTimestampMs) {}
+
+    /**
+     * 地图拉取成功事件。
+     *
+     * @param latencyMs 拉取耗时（毫秒）
+     * @param bytes 图片字节数
+     */
+    default void onMapFetchSuccess(long latencyMs, int bytes) {}
+
+    /**
+     * 地图拉取失败事件。
+     *
+     * @param stage 失败阶段
+     * @param reason 失败原因
+     */
+    default void onMapFetchError(String stage, String reason) {}
+
+    /**
+     * 图片入队事件。
+     *
+     * @param channel 通道名（IMGF）
+     * @param seq 帧序列号
+     * @param bytes 帧总字节数（含头部）
+     */
+    default void onImageEnqueued(String channel, int seq, int bytes) {}
+
+    /**
+     * 首帧地图已触发（开始拉取）回调。
+     */
+    default void onInitialMapFrameTriggered() {}
+
+    /**
+     * 首帧地图已发送回调。
+     */
+    default void onInitialMapFrameSent() {}
+
+    /**
+     * 周期地图帧已发送回调。
+     */
+    default void onPeriodicMapFrameSent() {}
+
+    /**
      * SDK 内部错误回调。
      *
      * @param stage 错误阶段标识，如 {@code transport.write}、{@code map.fetch}

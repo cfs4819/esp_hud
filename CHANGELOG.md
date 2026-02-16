@@ -12,6 +12,39 @@
 - 版本术语遵循 `ISO/IEC/IEEE 24765`（软件版本标识相关定义）。
 - 日期表示遵循 `ISO 8601`。
 
+## [0.5.1] - 2026-02-16
+
+### 变更
+- Java SDK 轨迹缓存策略从“超限后 FIFO 丢弃最旧点”改为“超限后执行 RDP（Douglas-Peucker）稀疏化”，在控制点数的同时尽量保持轨迹整体形状连续可读。
+- Java SDK 默认轨迹缓存上限从 `200` 提升到 `500`（`trackMaxPoints`）。
+
+## [0.5.0] - 2026-02-15
+
+### 新增
+- MSG 协议新增控制命令：
+  - `0x02`：设置屏幕亮度（`0..255`）
+  - `0x03`：设置显示翻转 `offset_rotation`（仅允许 `1/3/5/7`）
+- `lvgl_port` 新增运行时接口：
+  - `lvgl_port_set_brightness(uint8_t)`
+  - `lvgl_port_set_offset_rotation(uint8_t)`
+- 上位机示例 `example/host_pc.py` 新增命令发送参数：
+  - `--brightness`
+  - `--offset-rotation`
+
+### 变更
+- README 同步更新 MSG 控制命令协议与示例命令。
+- Java SDK 新增地图首帧/周期刷新通用策略：
+  - `initialFramePolicy`（默认 `ON_TWO_POINTS`）
+  - `periodicRefreshIntervalMs`（默认 `30000`）
+- Java SDK 新增地图链路可观测性回调：
+  - `map.fetch.start/success/error`
+  - `img.enqueue`
+  - `onInitialMapFrameTriggered/onInitialMapFrameSent/onPeriodicMapFrameSent`
+- Java SDK 新增显示控制命令接口：
+  - `sendBrightness(int)`
+  - `sendDisplayOffsetRotation(DisplayOffsetRotation)`
+  - `sendDisplayOffsetRotationRaw(int)`
+
 ## [0.4.1] - 2026-02-12
 
 ### 变更

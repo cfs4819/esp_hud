@@ -156,5 +156,60 @@ sdk.close();
 
 - `sendPng(byte[] pngBytes)`：手动直接下发 PNG（绕过 `MapImageProvider`）。
 - `sendReboot()`：发送下位机重启命令。
+- `sendBrightness(int brightness)`：设置亮度（`0..255`）。
+- `sendDisplayOffsetRotation(HudHostSdk.DisplayOffsetRotation rotation)`：设置显示翻转（推荐，避免魔法数字）。
+- `sendDisplayOffsetRotationRaw(int offsetRotation)`：按协议原值设置翻转（仅 `1/3/5/7`）。
 - `setListener(HudSdkListener listener)`：接收运行事件回调。
 - `HudStats getStats()`：读取统计信息。
+
+#### 显示翻转说明（重要）
+
+固件协议 `CMD=0x03` 的参数是 `offset_rotation`，允许值仅有 `1/3/5/7`。  
+为了避免业务方记忆协议常量，SDK 提供了强类型枚举：
+
+- `HudHostSdk.DisplayOffsetRotation.ROT_1`（协议值 `1`）
+- `HudHostSdk.DisplayOffsetRotation.ROT_3`（协议值 `3`）
+- `HudHostSdk.DisplayOffsetRotation.ROT_5`（协议值 `5`）
+- `HudHostSdk.DisplayOffsetRotation.ROT_7`（协议值 `7`）
+
+推荐这样调用：
+
+```java
+sdk.sendDisplayOffsetRotation(HudHostSdk.DisplayOffsetRotation.ROT_5);
+```
+
+若需要与旧系统做协议透传，可使用原值接口：
+
+```java
+sdk.sendDisplayOffsetRotationRaw(5);
+```
+
+## 地图首帧与周期策略（推荐）
+
+可通过 `HudSdkConfig.Builder` 配置：
+
+- `setInitialFramePolicy(HudSdkConfig.InitialFramePolicy.ON_TWO_POINTS)`
+  - 默认即 `ON_TWO_POINTS`：2 个有效 GPS 点后立即触发首帧地图拉取。
+- `setPeriodicRefreshIntervalMs(30000)`
+  - 默认 `30000` 毫秒；设为 `0` 可关闭周期刷新。
+
+示例：
+
+```java
+HudSdkConfig config = HudSdkConfig.newBuilder()
+        .setInitialFramePolicy(HudSdkConfig.InitialFramePolicy.ON_TWO_POINTS)
+        .setPeriodicRefreshIntervalMs(30_000)
+        .build();
+```
+
+## 可观测性回调
+
+`HudSdkListener` 新增地图链路回调：
+
+- `onMapFetchStart(pointCount, firstTimestampMs, lastTimestampMs)`
+- `onMapFetchSuccess(latencyMs, bytes)`
+- `onMapFetchError(stage, reason)`
+- `onImageEnqueued(channel, seq, bytes)`
+- `onInitialMapFrameTriggered()`
+- `onInitialMapFrameSent()`
+- `onPeriodicMapFrameSent()`

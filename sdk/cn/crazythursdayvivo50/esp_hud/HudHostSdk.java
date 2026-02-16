@@ -20,9 +20,15 @@ import java.util.concurrent.atomic.AtomicLong;
  * 该类线程安全，可在多线程环境下调用公开写入接口。
  */
 public final class HudHostSdk implements AutoCloseable {
+    private static final double EARTH_RADIUS_M = 6371000.0;
+    private static final double DEG_TO_RAD = Math.PI / 180.0;
+    private static final int RDP_BISECTION_STEPS = 12;
     private static final int PRIORITY_CONTROL = 0;
     private static final int PRIORITY_MSG = 1;
     private static final int PRIORITY_IMG = 2;
+    private static final int CMD_REBOOT = 0x01;
+    private static final int CMD_BRIGHTNESS = 0x02;
+    private static final int CMD_OFFSET_ROTATION = 0x03;
 
     private final HudTransport transport;
     private final MapImageProvider mapImageProvider;
@@ -44,13 +50,48 @@ public final class HudHostSdk implements AutoCloseable {
 
     private final Object gpsLock = new Object();
     private final ArrayDeque<GpsPoint> track = new ArrayDeque<GpsPoint>();
+    private enum MapFetchTriggerReason {
+        NORMAL,
+        INITIAL,
+        PERIODIC
+    }
+    private enum MapFrameKind {
+        NONE,
+        INITIAL,
+        PERIODIC
+    }
+
+    /**
+     * 显示 offset_rotation 预设。
+     * <p>
+     * 对应固件协议允许值：1 / 3 / 5 / 7。
+     */
+    public enum DisplayOffsetRotation {
+        /** 协议值 1。 */
+        ROT_1(1),
+        /** 协议值 3。 */
+        ROT_3(3),
+        /** 协议值 5。 */
+        ROT_5(5),
+        /** 协议值 7。 */
+        ROT_7(7);
+
+        final int value;
+
+        DisplayOffsetRotation(int value) {
+            this.value = value;
+        }
+    }
     private GpsPoint lastAcceptedPoint;
     private long lastGpsIngestMs;
     private long lastMapFetchMs;
+    private long lastPeriodicMapTriggerMs;
     private int acceptedSinceLastMap;
     private double distanceSinceLastMapM;
     private boolean mapFetchInFlight;
     private boolean mapFetchPending;
+    private boolean initialMapFrameTriggered;
+    private MapFetchTriggerReason retryReason = MapFetchTriggerReason.NORMAL;
     private boolean mapRetryScheduled;
     private long nextMapRetryAtMs;
     private long currentBackoffMs;
@@ -92,6 +133,22 @@ public final class HudHostSdk implements AutoCloseable {
         }
         running = true;
         writerRunning = true;
+        synchronized (gpsLock) {
+            track.clear();
+            lastAcceptedPoint = null;
+            lastGpsIngestMs = 0;
+            lastMapFetchMs = 0;
+            acceptedSinceLastMap = 0;
+            distanceSinceLastMapM = 0;
+            initialMapFrameTriggered = false;
+            lastPeriodicMapTriggerMs = 0;
+            mapFetchPending = false;
+            mapFetchInFlight = false;
+            mapRetryScheduled = false;
+            retryReason = MapFetchTriggerReason.NORMAL;
+            nextMapRetryAtMs = 0;
+            currentBackoffMs = config.mapRetryBackoffInitialMs;
+        }
         startWriterThread();
         long periodMs = Math.max(1L, 1000L / Math.max(1, config.msgRateHz));
         scheduler.scheduleAtFixedRate(new Runnable() {
@@ -294,8 +351,53 @@ public final class HudHostSdk implements AutoCloseable {
      */
     public void sendReboot() {
         int nextSeq = seq.getAndIncrement();
-        byte[] frame = FrameEncoder.encodeMsgCommandOnly(nextSeq, 0x01, config.enableCrc32);
-        enqueueControlFrame(new OutboundFrame(PRIORITY_CONTROL, queueOrder.incrementAndGet(), "CMD", nextSeq, frame));
+        byte[] frame = FrameEncoder.encodeMsgCommandOnly(nextSeq, CMD_REBOOT, config.enableCrc32);
+        enqueueControlFrame(new OutboundFrame(PRIORITY_CONTROL, queueOrder.incrementAndGet(), "CMD", nextSeq, frame, MapFrameKind.NONE));
+    }
+
+    /**
+     * 设置屏幕亮度（MSGF CMD=0x02）。
+     *
+     * @param brightness 亮度值，范围 0..255
+     * @throws IllegalArgumentException 当参数超出范围时抛出
+     */
+    public void sendBrightness(int brightness) {
+        if (brightness < 0 || brightness > 255) {
+            throw new IllegalArgumentException("brightness must be in range 0..255");
+        }
+        int nextSeq = seq.getAndIncrement();
+        byte[] frame = FrameEncoder.encodeMsgCommandWithU8Arg(nextSeq, CMD_BRIGHTNESS, brightness, config.enableCrc32);
+        enqueueControlFrame(new OutboundFrame(PRIORITY_CONTROL, queueOrder.incrementAndGet(), "CMD", nextSeq, frame, MapFrameKind.NONE));
+    }
+
+    /**
+     * 设置显示翻转（MSGF CMD=0x03）。
+     *
+     * @param rotation 旋转枚举，不能为空
+     * @throws IllegalArgumentException 当参数为空时抛出
+     */
+    public void sendDisplayOffsetRotation(DisplayOffsetRotation rotation) {
+        if (rotation == null) {
+            throw new IllegalArgumentException("rotation must not be null");
+        }
+        sendDisplayOffsetRotationRaw(rotation.value);
+    }
+
+    /**
+     * 设置显示翻转（MSGF CMD=0x03）。
+     * <p>
+     * 协议层允许值仅为 1/3/5/7。建议优先使用 {@link #sendDisplayOffsetRotation(DisplayOffsetRotation)}。
+     *
+     * @param offsetRotation 原始 offset_rotation 值（仅允许 1/3/5/7）
+     * @throws IllegalArgumentException 当参数非法时抛出
+     */
+    public void sendDisplayOffsetRotationRaw(int offsetRotation) {
+        if (offsetRotation != 1 && offsetRotation != 3 && offsetRotation != 5 && offsetRotation != 7) {
+            throw new IllegalArgumentException("offsetRotation must be one of 1,3,5,7");
+        }
+        int nextSeq = seq.getAndIncrement();
+        byte[] frame = FrameEncoder.encodeMsgCommandWithU8Arg(nextSeq, CMD_OFFSET_ROTATION, offsetRotation, config.enableCrc32);
+        enqueueControlFrame(new OutboundFrame(PRIORITY_CONTROL, queueOrder.incrementAndGet(), "CMD", nextSeq, frame, MapFrameKind.NONE));
     }
 
     /**
@@ -304,6 +406,10 @@ public final class HudHostSdk implements AutoCloseable {
      * @param pngBytes PNG 字节数组，不能为空，且不能超过 {@code imgMaxBytes}
      */
     public void sendPng(byte[] pngBytes) {
+        sendPngInternal(pngBytes, MapFrameKind.NONE);
+    }
+
+    private void sendPngInternal(byte[] pngBytes, MapFrameKind kind) {
         if (pngBytes == null || pngBytes.length == 0) {
             emitDrop("IMGF", "empty image");
             return;
@@ -314,7 +420,8 @@ public final class HudHostSdk implements AutoCloseable {
         }
         int nextSeq = seq.getAndIncrement();
         byte[] frame = FrameEncoder.encodeImgPng(nextSeq, pngBytes, config.enableCrc32);
-        enqueueImgFrame(new OutboundFrame(PRIORITY_IMG, queueOrder.incrementAndGet(), "IMGF", nextSeq, frame));
+        enqueueImgFrame(new OutboundFrame(PRIORITY_IMG, queueOrder.incrementAndGet(), "IMGF", nextSeq, frame, kind));
+        emitImageEnqueued("IMGF", nextSeq, frame.length);
     }
 
     /**
@@ -356,8 +463,8 @@ public final class HudHostSdk implements AutoCloseable {
             }
 
             track.addLast(point);
-            while (track.size() > config.trackMaxPoints) {
-                track.removeFirst();
+            if (track.size() > config.trackMaxPoints) {
+                sparsifyTrackLocked();
             }
             lastAcceptedPoint = point;
             lastGpsIngestMs = point.timestampMs;
@@ -399,7 +506,7 @@ public final class HudHostSdk implements AutoCloseable {
         }
         int nextSeq = seq.getAndIncrement();
         byte[] frame = FrameEncoder.encodeMsgSnapshot(nextSeq, s.snapshot, config.enableCrc32);
-        enqueueMsgFrame(new OutboundFrame(PRIORITY_MSG, queueOrder.incrementAndGet(), "MSGF", nextSeq, frame));
+        enqueueMsgFrame(new OutboundFrame(PRIORITY_MSG, queueOrder.incrementAndGet(), "MSGF", nextSeq, frame, MapFrameKind.NONE));
         lastMsgSentMs = now;
     }
 
@@ -407,6 +514,21 @@ public final class HudHostSdk implements AutoCloseable {
         if (mapImageProvider == null || track.size() < 2) {
             return;
         }
+
+        boolean triggerInitial = false;
+        if (!initialMapFrameTriggered
+                && config.initialFramePolicy == HudSdkConfig.InitialFramePolicy.ON_TWO_POINTS
+                && track.size() >= 2) {
+            triggerInitial = true;
+        }
+
+        boolean triggerPeriodic = false;
+        if (config.periodicRefreshIntervalMs > 0
+                && initialMapFrameTriggered
+                && (nowMs - lastPeriodicMapTriggerMs) >= config.periodicRefreshIntervalMs) {
+            triggerPeriodic = true;
+        }
+
         if (nowMs < nextMapRetryAtMs) {
             mapFetchPending = true;
             scheduleRetryLocked(nowMs);
@@ -415,13 +537,19 @@ public final class HudHostSdk implements AutoCloseable {
         boolean triggerByPoints = acceptedSinceLastMap >= config.mapTriggerPointCount;
         boolean triggerByTime = (nowMs - lastMapFetchMs) >= config.mapTriggerIntervalMs;
         boolean triggerByDistance = distanceSinceLastMapM >= config.mapTriggerDistanceM;
-        if (!(triggerByPoints || triggerByTime || triggerByDistance)) {
+        if (!(triggerInitial || triggerPeriodic || triggerByPoints || triggerByTime || triggerByDistance)) {
             return;
         }
-        requestMapFetchLocked(nowMs);
+        MapFetchTriggerReason reason = MapFetchTriggerReason.NORMAL;
+        if (triggerInitial) {
+            reason = MapFetchTriggerReason.INITIAL;
+        } else if (triggerPeriodic) {
+            reason = MapFetchTriggerReason.PERIODIC;
+        }
+        requestMapFetchLocked(nowMs, reason);
     }
 
-    private void requestMapFetchLocked(long nowMs) {
+    private void requestMapFetchLocked(long nowMs, final MapFetchTriggerReason reason) {
         if (!running) {
             return;
         }
@@ -432,13 +560,19 @@ public final class HudHostSdk implements AutoCloseable {
         mapFetchInFlight = true;
         mapFetchPending = false;
         lastMapFetchMs = nowMs;
+        if (reason == MapFetchTriggerReason.INITIAL) {
+            initialMapFrameTriggered = true;
+            emitInitialMapFrameTriggered();
+        } else if (reason == MapFetchTriggerReason.PERIODIC) {
+            lastPeriodicMapTriggerMs = nowMs;
+        }
         final List<GpsPoint> points = new ArrayList<GpsPoint>(track);
 
         try {
             scheduler.execute(new Runnable() {
                 @Override
                 public void run() {
-                    doMapFetch(points);
+                    doMapFetch(points, reason);
                 }
             });
         } catch (RejectedExecutionException e) {
@@ -448,17 +582,24 @@ public final class HudHostSdk implements AutoCloseable {
         }
     }
 
-    private void doMapFetch(List<GpsPoint> points) {
+    private void doMapFetch(List<GpsPoint> points, MapFetchTriggerReason reason) {
         boolean ok = false;
+        long t0 = System.currentTimeMillis();
+        if (!points.isEmpty()) {
+            emitMapFetchStart(points.size(), points.get(0).timestampMs, points.get(points.size() - 1).timestampMs);
+        }
         try {
             byte[] png = mapImageProvider.fetchTrackImage(points);
             if (png != null && png.length > 0) {
-                sendPng(png);
+                sendPngInternal(png, mapFrameKindFromReason(reason));
+                emitMapFetchSuccess(System.currentTimeMillis() - t0, png.length);
                 ok = true;
             } else {
                 emitDrop("IMGF", "map provider returned empty image");
+                emitMapFetchError("map.fetch", "map provider returned empty image");
             }
         } catch (Exception e) {
+            emitMapFetchError("map.fetch", String.valueOf(e.getMessage()));
             emitError("map.fetch", e);
         }
 
@@ -468,16 +609,18 @@ public final class HudHostSdk implements AutoCloseable {
                 distanceSinceLastMapM = 0;
                 currentBackoffMs = config.mapRetryBackoffInitialMs;
                 nextMapRetryAtMs = 0;
+                retryReason = MapFetchTriggerReason.NORMAL;
             } else {
                 nextMapRetryAtMs = System.currentTimeMillis() + currentBackoffMs;
                 currentBackoffMs = Math.min(currentBackoffMs * 2, config.mapRetryBackoffMaxMs);
                 mapFetchPending = true;
+                retryReason = reason;
                 scheduleRetryLocked(System.currentTimeMillis());
             }
             mapFetchInFlight = false;
 
             if (mapFetchPending && nextMapRetryAtMs == 0) {
-                requestMapFetchLocked(System.currentTimeMillis());
+                requestMapFetchLocked(System.currentTimeMillis(), retryReason);
             }
         }
     }
@@ -504,7 +647,7 @@ public final class HudHostSdk implements AutoCloseable {
                             scheduleRetryLocked(System.currentTimeMillis());
                             return;
                         }
-                        requestMapFetchLocked(System.currentTimeMillis());
+                        requestMapFetchLocked(System.currentTimeMillis(), retryReason);
                     }
                 }
             }, delayMs, TimeUnit.MILLISECONDS);
@@ -522,10 +665,13 @@ public final class HudHostSdk implements AutoCloseable {
             return "latlon out of range";
         }
         synchronized (gpsLock) {
-            if (lastGpsIngestMs > 0 && p.timestampMs <= lastGpsIngestMs) {
+            // Bootstrap 首帧阶段允许更宽松的时间过滤，尽快凑齐 2 个点触发首帧地图。
+            boolean bypassTimeFilterForBootstrap = track.size() < 2;
+            if (!bypassTimeFilterForBootstrap && lastGpsIngestMs > 0 && p.timestampMs <= lastGpsIngestMs) {
                 return "timestamp not monotonic";
             }
-            if (lastGpsIngestMs > 0 && (p.timestampMs - lastGpsIngestMs) < config.gpsMinIntervalMs) {
+            if (!bypassTimeFilterForBootstrap && lastGpsIngestMs > 0
+                    && (p.timestampMs - lastGpsIngestMs) < config.gpsMinIntervalMs) {
                 return "interval<" + config.gpsMinIntervalMs + "ms";
             }
         }
@@ -547,15 +693,111 @@ public final class HudHostSdk implements AutoCloseable {
         return diff >= config.gpsTurnAngleDeg;
     }
 
+    private void sparsifyTrackLocked() {
+        if (track.size() <= config.trackMaxPoints) {
+            return;
+        }
+        List<GpsPoint> dense = new ArrayList<GpsPoint>(track);
+        List<GpsPoint> sparse = simplifyTrackToMaxPoints(dense, config.trackMaxPoints);
+        track.clear();
+        track.addAll(sparse);
+    }
+
+    private static List<GpsPoint> simplifyTrackToMaxPoints(List<GpsPoint> points, int maxPoints) {
+        if (points.size() <= maxPoints) {
+            return points;
+        }
+        double low = 0.0;
+        double high = 2.0;
+        List<GpsPoint> best = simplifyRdp(points, high);
+        while (best.size() > maxPoints && high < 50000.0) {
+            low = high;
+            high *= 2.0;
+            best = simplifyRdp(points, high);
+        }
+        if (best.size() > maxPoints) {
+            return best;
+        }
+
+        for (int i = 0; i < RDP_BISECTION_STEPS; i++) {
+            double mid = (low + high) * 0.5;
+            List<GpsPoint> candidate = simplifyRdp(points, mid);
+            if (candidate.size() > maxPoints) {
+                low = mid;
+            } else {
+                high = mid;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    private static List<GpsPoint> simplifyRdp(List<GpsPoint> points, double epsilonMeters) {
+        int n = points.size();
+        if (n <= 2) {
+            return points;
+        }
+        boolean[] keep = new boolean[n];
+        keep[0] = true;
+        keep[n - 1] = true;
+        markRdpKeep(points, 0, n - 1, epsilonMeters, keep);
+
+        List<GpsPoint> out = new ArrayList<GpsPoint>(n);
+        for (int i = 0; i < n; i++) {
+            if (keep[i]) {
+                out.add(points.get(i));
+            }
+        }
+        return out;
+    }
+
+    private static void markRdpKeep(List<GpsPoint> points, int start, int end, double epsilonMeters, boolean[] keep) {
+        if (end - start <= 1) {
+            return;
+        }
+        GpsPoint a = points.get(start);
+        GpsPoint b = points.get(end);
+        int farthestIdx = -1;
+        double farthestDistance = -1.0;
+        for (int i = start + 1; i < end; i++) {
+            double d = pointToSegmentDistanceMeters(points.get(i), a, b);
+            if (d > farthestDistance) {
+                farthestDistance = d;
+                farthestIdx = i;
+            }
+        }
+        if (farthestIdx > start && farthestDistance > epsilonMeters) {
+            keep[farthestIdx] = true;
+            markRdpKeep(points, start, farthestIdx, epsilonMeters, keep);
+            markRdpKeep(points, farthestIdx, end, epsilonMeters, keep);
+        }
+    }
+
+    private static double pointToSegmentDistanceMeters(GpsPoint p, GpsPoint a, GpsPoint b) {
+        double refLatRad = Math.toRadians((a.latitude + b.latitude + p.latitude) / 3.0);
+        double bx = (b.longitude - a.longitude) * DEG_TO_RAD * EARTH_RADIUS_M * Math.cos(refLatRad);
+        double by = (b.latitude - a.latitude) * DEG_TO_RAD * EARTH_RADIUS_M;
+        double px = (p.longitude - a.longitude) * DEG_TO_RAD * EARTH_RADIUS_M * Math.cos(refLatRad);
+        double py = (p.latitude - a.latitude) * DEG_TO_RAD * EARTH_RADIUS_M;
+        double segLen2 = bx * bx + by * by;
+        if (segLen2 <= 1e-9) {
+            return Math.hypot(px, py);
+        }
+        double t = (px * bx + py * by) / segLen2;
+        t = Math.max(0.0, Math.min(1.0, t));
+        double dx = px - t * bx;
+        double dy = py - t * by;
+        return Math.hypot(dx, dy);
+    }
+
     private static double distanceMeters(double lat1, double lon1, double lat2, double lon2) {
-        final double r = 6371000.0;
         double dLat = Math.toRadians(lat2 - lat1);
         double dLon = Math.toRadians(lon2 - lon1);
         double a = Math.sin(dLat / 2.0) * Math.sin(dLat / 2.0)
                 + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
                 * Math.sin(dLon / 2.0) * Math.sin(dLon / 2.0);
         double c = 2.0 * Math.atan2(Math.sqrt(a), Math.sqrt(1.0 - a));
-        return r * c;
+        return EARTH_RADIUS_M * c;
     }
 
     private void startWriterThread() {
@@ -640,6 +882,11 @@ public final class HudHostSdk implements AutoCloseable {
             sentMsg.incrementAndGet();
         } else if ("IMGF".equals(f.channel)) {
             sentImg.incrementAndGet();
+            if (f.mapFrameKind == MapFrameKind.INITIAL) {
+                emitInitialMapFrameSent();
+            } else if (f.mapFrameKind == MapFrameKind.PERIODIC) {
+                emitPeriodicMapFrameSent();
+            }
         } else if ("CMD".equals(f.channel)) {
             sentCmd.incrementAndGet();
         }
@@ -665,6 +912,65 @@ public final class HudHostSdk implements AutoCloseable {
         }
     }
 
+    private void emitMapFetchStart(int pointCount, long firstTimestampMs, long lastTimestampMs) {
+        HudSdkListener l = listener;
+        if (l != null) {
+            l.onMapFetchStart(pointCount, firstTimestampMs, lastTimestampMs);
+        }
+    }
+
+    private void emitMapFetchSuccess(long latencyMs, int bytes) {
+        HudSdkListener l = listener;
+        if (l != null) {
+            l.onMapFetchSuccess(latencyMs, bytes);
+        }
+    }
+
+    private void emitMapFetchError(String stage, String reason) {
+        HudSdkListener l = listener;
+        if (l != null) {
+            l.onMapFetchError(stage, reason);
+        }
+    }
+
+    private void emitImageEnqueued(String channel, int seq, int bytes) {
+        HudSdkListener l = listener;
+        if (l != null) {
+            l.onImageEnqueued(channel, seq, bytes);
+        }
+    }
+
+    private void emitInitialMapFrameTriggered() {
+        HudSdkListener l = listener;
+        if (l != null) {
+            l.onInitialMapFrameTriggered();
+        }
+    }
+
+    private void emitInitialMapFrameSent() {
+        HudSdkListener l = listener;
+        if (l != null) {
+            l.onInitialMapFrameSent();
+        }
+    }
+
+    private void emitPeriodicMapFrameSent() {
+        HudSdkListener l = listener;
+        if (l != null) {
+            l.onPeriodicMapFrameSent();
+        }
+    }
+
+    private static MapFrameKind mapFrameKindFromReason(MapFetchTriggerReason reason) {
+        if (reason == MapFetchTriggerReason.INITIAL) {
+            return MapFrameKind.INITIAL;
+        }
+        if (reason == MapFetchTriggerReason.PERIODIC) {
+            return MapFrameKind.PERIODIC;
+        }
+        return MapFrameKind.NONE;
+    }
+
     private void emitGpsAccepted(GpsPoint point) {
         HudSdkListener l = listener;
         if (l != null) {
@@ -685,13 +991,15 @@ public final class HudHostSdk implements AutoCloseable {
         final String channel;
         final int seq;
         final byte[] bytes;
+        final MapFrameKind mapFrameKind;
 
-        OutboundFrame(int priority, long order, String channel, int seq, byte[] bytes) {
+        OutboundFrame(int priority, long order, String channel, int seq, byte[] bytes, MapFrameKind mapFrameKind) {
             this.priority = priority;
             this.order = order;
             this.channel = channel;
             this.seq = seq;
             this.bytes = bytes;
+            this.mapFrameKind = mapFrameKind;
         }
 
         @Override

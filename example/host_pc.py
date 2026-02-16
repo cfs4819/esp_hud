@@ -18,6 +18,8 @@ seq  u32
 uint8  cmd
   - 0x00: 状态快照，后续字段与旧协议一致
   - 0x01: 设备重启（后续可无payload）
+  - 0x02: 设置亮度（后续1字节，0..255）
+  - 0x03: 设置显示翻转（后续1字节，仅 1/3/5/7）
 int16  speed_kmh
 int16  engine_speed_rpm
 int32  odo_m
@@ -56,6 +58,8 @@ MAGIC_MSGF = b"MSGF"
 MAGIC_IMGF = b"IMGF"
 MSG_CMD_SNAPSHOT = 0x00
 MSG_CMD_REBOOT = 0x01
+MSG_CMD_BRIGHTNESS = 0x02
+MSG_CMD_OFFSET_ROTATION = 0x03
 
 
 def u32_le_from_magic(magic4: bytes) -> int:
@@ -173,6 +177,14 @@ class HostSender:
 
     def send_msgf_cmd_only(self, cmd: int):
         payload = struct.pack("<B", cmd & 0xFF)
+        self.send_frame(MAGIC_MSGF, payload)
+
+    def send_brightness(self, brightness: int):
+        payload = struct.pack("<BB", MSG_CMD_BRIGHTNESS, int(brightness) & 0xFF)
+        self.send_frame(MAGIC_MSGF, payload)
+
+    def send_offset_rotation(self, offset_rotation: int):
+        payload = struct.pack("<BB", MSG_CMD_OFFSET_ROTATION, int(offset_rotation) & 0xFF)
         self.send_frame(MAGIC_MSGF, payload)
 
     def send_imgf(self, png_path: str):
@@ -337,7 +349,8 @@ def run_demo(
 
 def run_once(sender: HostSender, speed: int, rpm: int, odo: int, trip: int, out_t: int, in_t: int, batt: int,
              curr_time: str, trip_min: int, fuel_left: float, fuel_total: float, png_path: Optional[str], img_mode: str,
-             img_w: Optional[int], img_h: Optional[int], r565_swap_bytes: bool, reboot_cmd: bool):
+             img_w: Optional[int], img_h: Optional[int], r565_swap_bytes: bool, reboot_cmd: bool,
+             brightness: Optional[int], offset_rotation: Optional[int]):
     snap = MsgfSnapshot(
         speed_kmh=speed,
         engine_rpm=rpm,
@@ -354,6 +367,14 @@ def run_once(sender: HostSender, speed: int, rpm: int, odo: int, trip: int, out_
     sender.send_msgf(snap, cmd=MSG_CMD_SNAPSHOT)
     if reboot_cmd:
         sender.send_msgf_cmd_only(MSG_CMD_REBOOT)
+    if brightness is not None:
+        if not (0 <= brightness <= 255):
+            raise ValueError("--brightness must be in range 0..255")
+        sender.send_brightness(brightness)
+    if offset_rotation is not None:
+        if offset_rotation not in (1, 3, 5, 7):
+            raise ValueError("--offset-rotation must be one of 1,3,5,7")
+        sender.send_offset_rotation(offset_rotation)
     if png_path:
         with open(png_path, "rb") as f:
             png = f.read()
@@ -418,6 +439,8 @@ def main():
     ap.add_argument("--fuel-left", type=float, default=36.0, help="油箱余量，单位L（once 模式）")
     ap.add_argument("--fuel-total", type=float, default=52.0, help="油箱总量，单位L（once 模式）")
     ap.add_argument("--reboot-cmd", action="store_true", help="once模式额外发送CMD=0x01重启命令")
+    ap.add_argument("--brightness", type=int, default=None, help="once模式可选：发送CMD=0x02设置亮度(0..255)")
+    ap.add_argument("--offset-rotation", type=int, default=None, help="once模式可选：发送CMD=0x03设置翻转(1/3/5/7)")
 
     args = ap.parse_args()
 
@@ -519,7 +542,7 @@ def main():
             run_once(sender, args.speed, args.rpm, args.odo, args.trip,
                     args.out_t, args.in_t, args.batt,
                     args.time, args.trip_min, args.fuel_left, args.fuel_total, args.png, args.img_mode, args.img_w, args.img_h,
-                    args.r565_swap_bytes, args.reboot_cmd)
+                    args.r565_swap_bytes, args.reboot_cmd, args.brightness, args.offset_rotation)
     finally:
         sender.close()
 

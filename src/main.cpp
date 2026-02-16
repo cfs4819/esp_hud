@@ -70,6 +70,35 @@ static void handle_msg_command(const uint8_t *msg, size_t len, uint32_t seq)
             esp_restart();
             break;
 
+        case 0x02: {
+            if (payload_len < 1) {
+                Serial0.println("[MSG] CMD=0x02 invalid payload");
+                break;
+            }
+            const uint8_t brightness = payload[0];
+            if (lvgl_port_set_brightness(brightness)) {
+                Serial0.printf("[MSG] CMD=0x02 brightness=%u\n", (unsigned)brightness);
+            } else {
+                Serial0.printf("[MSG] CMD=0x02 failed, brightness=%u\n", (unsigned)brightness);
+            }
+            break;
+        }
+
+        case 0x03: {
+            if (payload_len < 1) {
+                Serial0.println("[MSG] CMD=0x03 invalid payload");
+                break;
+            }
+            const uint8_t offset_rotation = payload[0];
+            if (lvgl_port_set_offset_rotation(offset_rotation)) {
+                Serial0.printf("[MSG] CMD=0x03 offset_rotation=%u\n", (unsigned)offset_rotation);
+            } else {
+                Serial0.printf("[MSG] CMD=0x03 invalid offset_rotation=%u (allow: 1,3,5,7)\n",
+                               (unsigned)offset_rotation);
+            }
+            break;
+        }
+
         default:
             // Reserved for future commands.
             Serial0.printf("[MSG] unknown CMD=0x%02X, len=%u\n", cmd, (unsigned)len);
