@@ -6,6 +6,14 @@ package cn.crazythursdayvivo50.esp_hud;
  * 通过 {@link Builder} 构建实例，未设置项将使用默认值。
  */
 public final class HudSdkConfig {
+    /** 首帧地图触发策略。 */
+    public enum InitialFramePolicy {
+        /** 不额外触发首帧，仅使用常规触发条件。 */
+        DISABLED,
+        /** 收到 2 个有效 GPS 点后立即触发首帧地图。 */
+        ON_TWO_POINTS
+    }
+
     /** MSGF 正常发送频率（Hz）。默认 24。 */
     public final int msgRateHz;
     /** 数据无变化时的保活发送频率（Hz）。默认 2。 */
@@ -28,10 +36,14 @@ public final class HudSdkConfig {
     public final long mapTriggerIntervalMs;
     /** 地图触发：累计位移阈值（米）。默认 30。 */
     public final double mapTriggerDistanceM;
-    /** 轨迹缓存最大点数。默认 200。 */
+    /** 轨迹缓存最大点数。默认 500。 */
     public final int trackMaxPoints;
     /** 单张图像允许的最大字节数。默认 128KB。 */
     public final int imgMaxBytes;
+    /** 首帧地图触发策略。默认 ON_TWO_POINTS。 */
+    public final InitialFramePolicy initialFramePolicy;
+    /** 地图周期刷新间隔（毫秒）。默认 30000，设为 0 表示关闭周期刷新。 */
+    public final long periodicRefreshIntervalMs;
 
     /** 是否启用 CRC32。默认关闭（与当前下位机默认设置一致）。 */
     public final boolean enableCrc32;
@@ -58,6 +70,8 @@ public final class HudSdkConfig {
         this.mapTriggerDistanceM = b.mapTriggerDistanceM;
         this.trackMaxPoints = b.trackMaxPoints;
         this.imgMaxBytes = b.imgMaxBytes;
+        this.initialFramePolicy = b.initialFramePolicy;
+        this.periodicRefreshIntervalMs = b.periodicRefreshIntervalMs;
         this.enableCrc32 = b.enableCrc32;
         this.msgQueueCapacity = b.msgQueueCapacity;
         this.imgQueueCapacity = b.imgQueueCapacity;
@@ -90,8 +104,10 @@ public final class HudSdkConfig {
         private int mapTriggerPointCount = 5;
         private long mapTriggerIntervalMs = 2000;
         private double mapTriggerDistanceM = 30.0;
-        private int trackMaxPoints = 200;
+        private int trackMaxPoints = 500;
         private int imgMaxBytes = 128 * 1024;
+        private InitialFramePolicy initialFramePolicy = InitialFramePolicy.ON_TWO_POINTS;
+        private long periodicRefreshIntervalMs = 30000;
 
         private boolean enableCrc32 = false;
         private int msgQueueCapacity = 1;
@@ -233,6 +249,28 @@ public final class HudSdkConfig {
         }
 
         /**
+         * 设置首帧地图触发策略。
+         *
+         * @param value 触发策略，不能为空
+         * @return 当前 Builder
+         */
+        public Builder setInitialFramePolicy(InitialFramePolicy value) {
+            this.initialFramePolicy = value;
+            return this;
+        }
+
+        /**
+         * 设置地图周期刷新间隔。
+         *
+         * @param value 周期毫秒数，设为 0 表示关闭周期刷新
+         * @return 当前 Builder
+         */
+        public Builder setPeriodicRefreshIntervalMs(long value) {
+            this.periodicRefreshIntervalMs = value;
+            return this;
+        }
+
+        /**
          * 设置是否启用 CRC32。
          *
          * @param value 是否启用
@@ -317,6 +355,12 @@ public final class HudSdkConfig {
             }
             if (imgMaxBytes <= 0) {
                 throw new IllegalArgumentException("imgMaxBytes must be > 0");
+            }
+            if (initialFramePolicy == null) {
+                throw new IllegalArgumentException("initialFramePolicy must not be null");
+            }
+            if (periodicRefreshIntervalMs < 0) {
+                throw new IllegalArgumentException("periodicRefreshIntervalMs must be >= 0");
             }
             if (msgQueueCapacity <= 0) {
                 throw new IllegalArgumentException("msgQueueCapacity must be > 0");

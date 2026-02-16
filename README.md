@@ -91,6 +91,8 @@ typedef struct __attribute__((packed)) {
 `MSGF payload` 第 1 字节为命令字 `CMD`：
 - `CMD=0x00`：状态快照，后续字段与原协议一致
 - `CMD=0x01`：重启设备（可仅发送 1 字节 CMD）
+- `CMD=0x02`：设置屏幕亮度，`payload[1]` 为亮度值（`0..255`）
+- `CMD=0x03`：设置显示翻转，`payload[1]` 为 `offset_rotation`（仅允许 `1/3/5/7`）
 
 | 偏移 | 大小 | 类型 | 描述 |
 |------|------|------|------|
@@ -106,6 +108,18 @@ typedef struct __attribute__((packed)) {
 | 21 | 2 | uint16 | 行程时间(分钟) |
 | 23 | 2 | uint16 | 油箱余量(0.1L) |
 | 25 | 2 | uint16 | 油箱总量(0.1L) |
+
+控制命令 payload 简表：
+
+| 偏移 | 大小 | 类型 | 描述 |
+|------|------|------|------|
+| 0 | 1 | uint8 | `CMD=0x02` |
+| 1 | 1 | uint8 | `brightness`，范围 `0..255` |
+
+| 偏移 | 大小 | 类型 | 描述 |
+|------|------|------|------|
+| 0 | 1 | uint8 | `CMD=0x03` |
+| 1 | 1 | uint8 | `offset_rotation`，仅 `1/3/5/7` |
 
 ### IMGF图像帧 (PNG地图数据)
 - 直接传输PNG格式的图像数据
@@ -185,6 +199,12 @@ python example/host_pc.py --port COM5 --mode once --speed 80 --rpm 1800
 
 # 发送重启命令（CMD=0x01）
 python example/host_pc.py --port COM5 --mode once --reboot-cmd
+
+# 设置亮度（CMD=0x02，0..255）
+python example/host_pc.py --port COM5 --mode once --brightness 180
+
+# 设置显示翻转（CMD=0x03，仅1/3/5/7）
+python example/host_pc.py --port COM5 --mode once --offset-rotation 5
 ```
 
 ## 🛠️ 开发指南

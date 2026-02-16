@@ -31,6 +31,14 @@ final class FrameEncoder {
         return encodeFrame(MAGIC_MSGF, payload, seq, enableCrc32);
     }
 
+    static byte[] encodeMsgCommandWithU8Arg(int seq, int cmd, int arg, boolean enableCrc32) {
+        byte[] payload = new byte[] {
+                (byte) (cmd & 0xFF),
+                (byte) (arg & 0xFF)
+        };
+        return encodeFrame(MAGIC_MSGF, payload, seq, enableCrc32);
+    }
+
     static byte[] encodeImgPng(int seq, byte[] png, boolean enableCrc32) {
         return encodeFrame(MAGIC_IMGF, png, seq, enableCrc32);
     }
@@ -99,4 +107,3 @@ final class FrameEncoder {
         return value;
     }
 }
-

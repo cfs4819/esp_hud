@@ -22,6 +22,12 @@ void lvgl_port_resume(void);
 // 当前是否已进入暂停态
 bool lvgl_port_is_suspended(void);
 
+// 设置屏幕亮度（0-255）
+bool lvgl_port_set_brightness(uint8_t brightness);
+
+// 设置面板 offset_rotation（仅支持 1/3/5/7）
+bool lvgl_port_set_offset_rotation(uint8_t offset_rotation);
+
 #ifdef __cplusplus
 }
 #endif

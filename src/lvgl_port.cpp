@@ -199,3 +199,37 @@ bool lvgl_port_is_suspended(void)
 {
     return s_is_suspended;
 }
+
+bool lvgl_port_set_brightness(uint8_t brightness)
+{
+    tft.setBrightness(brightness);
+    return true;
+}
+
+bool lvgl_port_set_offset_rotation(uint8_t offset_rotation)
+{
+    if ((offset_rotation > 7) || ((offset_rotation & 0x01u) == 0u)) {
+        return false;
+    }
+
+    auto *panel = tft.getPanel();
+    if (!panel) {
+        return false;
+    }
+
+    const bool was_suspended = lvgl_port_is_suspended();
+    if (!was_suspended) {
+        lvgl_port_suspend();
+    }
+
+    auto cfg = panel->config();
+    cfg.offset_rotation = offset_rotation;
+    panel->config(cfg);
+    // 重新应用当前旋转，让新的 offset_rotation 立即生效。
+    tft.setRotation(tft.getRotation());
+
+    if (!was_suspended) {
+        lvgl_port_resume();
+    }
+    return true;
+}
