@@ -36,7 +36,7 @@ public final class HudSdkConfig {
     public final long mapTriggerIntervalMs;
     /** 地图触发：累计位移阈值（米）。默认 30。 */
     public final double mapTriggerDistanceM;
-    /** 轨迹缓存最大点数。默认 500。 */
+    /** 在线简化后的轨迹最大点数（用于地图请求）。默认 500。 */
     public final int trackMaxPoints;
     /** 单张图像允许的最大字节数。默认 128KB。 */
     public final int imgMaxBytes;

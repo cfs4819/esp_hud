@@ -178,6 +178,14 @@ sdk.close();
 sdk.sendDisplayOffsetRotation(HudHostSdk.DisplayOffsetRotation.ROT_5);
 ```
 
+如果业务侧需要持久化/日志/透传协议原值，可直接读取：
+
+```java
+HudHostSdk.DisplayOffsetRotation rotation = HudHostSdk.DisplayOffsetRotation.ROT_5;
+int protocolValue = rotation.getProtocolValue(); // 5
+int protocolValueCompat = rotation.value();      // 5（兼容命名）
+```
+
 若需要与旧系统做协议透传，可使用原值接口：
 
 ```java

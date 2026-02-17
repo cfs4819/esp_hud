@@ -1,7 +1,6 @@
 package cn.crazythursdayvivo50.esp_hud;
 
 import java.io.IOException;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
@@ -21,8 +20,6 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class HudHostSdk implements AutoCloseable {
     private static final double EARTH_RADIUS_M = 6371000.0;
-    private static final double DEG_TO_RAD = Math.PI / 180.0;
-    private static final int RDP_BISECTION_STEPS = 12;
     private static final int PRIORITY_CONTROL = 0;
     private static final int PRIORITY_MSG = 1;
     private static final int PRIORITY_IMG = 2;
@@ -49,7 +46,7 @@ public final class HudHostSdk implements AutoCloseable {
     private final AtomicLong errors = new AtomicLong(0);
 
     private final Object gpsLock = new Object();
-    private final ArrayDeque<GpsPoint> track = new ArrayDeque<GpsPoint>();
+    private final OnlineVwTrackSimplifier simplifiedTrack;
     private enum MapFetchTriggerReason {
         NORMAL,
         INITIAL,
@@ -80,6 +77,24 @@ public final class HudHostSdk implements AutoCloseable {
 
         DisplayOffsetRotation(int value) {
             this.value = value;
+        }
+
+        /**
+         * 返回该枚举对应的协议值（仅可能为 1/3/5/7）。
+         *
+         * @return 协议层 offset_rotation 原值
+         */
+        public int getProtocolValue() {
+            return value;
+        }
+
+        /**
+         * 返回该枚举对应的协议值（兼容旧命名）。
+         *
+         * @return 协议层 offset_rotation 原值
+         */
+        public int value() {
+            return value;
         }
     }
     private GpsPoint lastAcceptedPoint;
@@ -116,6 +131,7 @@ public final class HudHostSdk implements AutoCloseable {
         this.transport = transport;
         this.mapImageProvider = mapImageProvider;
         this.config = (config != null) ? config : HudSdkConfig.newBuilder().build();
+        this.simplifiedTrack = new OnlineVwTrackSimplifier(this.config.trackMaxPoints);
         this.currentBackoffMs = this.config.mapRetryBackoffInitialMs;
     }
 
@@ -134,7 +150,7 @@ public final class HudHostSdk implements AutoCloseable {
         running = true;
         writerRunning = true;
         synchronized (gpsLock) {
-            track.clear();
+            simplifiedTrack.clear();
             lastAcceptedPoint = null;
             lastGpsIngestMs = 0;
             lastMapFetchMs = 0;
@@ -380,7 +396,7 @@ public final class HudHostSdk implements AutoCloseable {
         if (rotation == null) {
             throw new IllegalArgumentException("rotation must not be null");
         }
-        sendDisplayOffsetRotationRaw(rotation.value);
+        sendDisplayOffsetRotationRaw(rotation.getProtocolValue());
     }
 
     /**
@@ -454,7 +470,7 @@ public final class HudHostSdk implements AutoCloseable {
             if (lastAcceptedPoint != null) {
                 double d = distanceMeters(lastAcceptedPoint.latitude, lastAcceptedPoint.longitude, point.latitude, point.longitude);
                 boolean turnKeep = shouldKeepTurnPoint(lastAcceptedPoint, point, d);
-                boolean bypassMinDistanceForBootstrap = track.size() < 2;
+                boolean bypassMinDistanceForBootstrap = simplifiedTrack.size() < 2;
                 if (!bypassMinDistanceForBootstrap && d < config.gpsMinDistanceM && !turnKeep) {
                     emitGpsFiltered(point, "distance<" + config.gpsMinDistanceM + "m");
                     return;
@@ -462,10 +478,7 @@ public final class HudHostSdk implements AutoCloseable {
                 distanceSinceLastMapM += d;
             }
 
-            track.addLast(point);
-            if (track.size() > config.trackMaxPoints) {
-                sparsifyTrackLocked();
-            }
+            simplifiedTrack.add(point);
             lastAcceptedPoint = point;
             lastGpsIngestMs = point.timestampMs;
             acceptedSinceLastMap++;
@@ -511,14 +524,14 @@ public final class HudHostSdk implements AutoCloseable {
     }
 
     private void maybeTriggerMapFetchLocked(long nowMs) {
-        if (mapImageProvider == null || track.size() < 2) {
+        if (mapImageProvider == null || simplifiedTrack.size() < 2) {
             return;
         }
 
         boolean triggerInitial = false;
         if (!initialMapFrameTriggered
                 && config.initialFramePolicy == HudSdkConfig.InitialFramePolicy.ON_TWO_POINTS
-                && track.size() >= 2) {
+                && simplifiedTrack.size() >= 2) {
             triggerInitial = true;
         }
 
@@ -566,7 +579,7 @@ public final class HudHostSdk implements AutoCloseable {
         } else if (reason == MapFetchTriggerReason.PERIODIC) {
             lastPeriodicMapTriggerMs = nowMs;
         }
-        final List<GpsPoint> points = new ArrayList<GpsPoint>(track);
+        final List<GpsPoint> points = simplifiedTrack.snapshot();
 
         try {
             scheduler.execute(new Runnable() {
@@ -666,7 +679,7 @@ public final class HudHostSdk implements AutoCloseable {
         }
         synchronized (gpsLock) {
             // Bootstrap 首帧阶段允许更宽松的时间过滤，尽快凑齐 2 个点触发首帧地图。
-            boolean bypassTimeFilterForBootstrap = track.size() < 2;
+            boolean bypassTimeFilterForBootstrap = simplifiedTrack.size() < 2;
             if (!bypassTimeFilterForBootstrap && lastGpsIngestMs > 0 && p.timestampMs <= lastGpsIngestMs) {
                 return "timestamp not monotonic";
             }
@@ -691,103 +704,6 @@ public final class HudHostSdk implements AutoCloseable {
         double diff = Math.abs(last.bearingDeg - current.bearingDeg);
         diff = Math.min(diff, 360.0 - diff);
         return diff >= config.gpsTurnAngleDeg;
-    }
-
-    private void sparsifyTrackLocked() {
-        if (track.size() <= config.trackMaxPoints) {
-            return;
-        }
-        List<GpsPoint> dense = new ArrayList<GpsPoint>(track);
-        List<GpsPoint> sparse = simplifyTrackToMaxPoints(dense, config.trackMaxPoints);
-        track.clear();
-        track.addAll(sparse);
-    }
-
-    private static List<GpsPoint> simplifyTrackToMaxPoints(List<GpsPoint> points, int maxPoints) {
-        if (points.size() <= maxPoints) {
-            return points;
-        }
-        double low = 0.0;
-        double high = 2.0;
-        List<GpsPoint> best = simplifyRdp(points, high);
-        while (best.size() > maxPoints && high < 50000.0) {
-            low = high;
-            high *= 2.0;
-            best = simplifyRdp(points, high);
-        }
-        if (best.size() > maxPoints) {
-            return best;
-        }
-
-        for (int i = 0; i < RDP_BISECTION_STEPS; i++) {
-            double mid = (low + high) * 0.5;
-            List<GpsPoint> candidate = simplifyRdp(points, mid);
-            if (candidate.size() > maxPoints) {
-                low = mid;
-            } else {
-                high = mid;
-                best = candidate;
-            }
-        }
-        return best;
-    }
-
-    private static List<GpsPoint> simplifyRdp(List<GpsPoint> points, double epsilonMeters) {
-        int n = points.size();
-        if (n <= 2) {
-            return points;
-        }
-        boolean[] keep = new boolean[n];
-        keep[0] = true;
-        keep[n - 1] = true;
-        markRdpKeep(points, 0, n - 1, epsilonMeters, keep);
-
-        List<GpsPoint> out = new ArrayList<GpsPoint>(n);
-        for (int i = 0; i < n; i++) {
-            if (keep[i]) {
-                out.add(points.get(i));
-            }
-        }
-        return out;
-    }
-
-    private static void markRdpKeep(List<GpsPoint> points, int start, int end, double epsilonMeters, boolean[] keep) {
-        if (end - start <= 1) {
-            return;
-        }
-        GpsPoint a = points.get(start);
-        GpsPoint b = points.get(end);
-        int farthestIdx = -1;
-        double farthestDistance = -1.0;
-        for (int i = start + 1; i < end; i++) {
-            double d = pointToSegmentDistanceMeters(points.get(i), a, b);
-            if (d > farthestDistance) {
-                farthestDistance = d;
-                farthestIdx = i;
-            }
-        }
-        if (farthestIdx > start && farthestDistance > epsilonMeters) {
-            keep[farthestIdx] = true;
-            markRdpKeep(points, start, farthestIdx, epsilonMeters, keep);
-            markRdpKeep(points, farthestIdx, end, epsilonMeters, keep);
-        }
-    }
-
-    private static double pointToSegmentDistanceMeters(GpsPoint p, GpsPoint a, GpsPoint b) {
-        double refLatRad = Math.toRadians((a.latitude + b.latitude + p.latitude) / 3.0);
-        double bx = (b.longitude - a.longitude) * DEG_TO_RAD * EARTH_RADIUS_M * Math.cos(refLatRad);
-        double by = (b.latitude - a.latitude) * DEG_TO_RAD * EARTH_RADIUS_M;
-        double px = (p.longitude - a.longitude) * DEG_TO_RAD * EARTH_RADIUS_M * Math.cos(refLatRad);
-        double py = (p.latitude - a.latitude) * DEG_TO_RAD * EARTH_RADIUS_M;
-        double segLen2 = bx * bx + by * by;
-        if (segLen2 <= 1e-9) {
-            return Math.hypot(px, py);
-        }
-        double t = (px * bx + py * by) / segLen2;
-        t = Math.max(0.0, Math.min(1.0, t));
-        double dx = px - t * bx;
-        double dy = py - t * by;
-        return Math.hypot(dx, dy);
     }
 
     private static double distanceMeters(double lat1, double lon1, double lat2, double lon2) {
