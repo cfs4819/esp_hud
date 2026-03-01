@@ -1,5 +1,7 @@
 package cn.crazythursdayvivo50.esp_hud;
 
+// import android.util.Log;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -10,15 +12,16 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 
-/**
- * 默认 HTTP 轨迹地图图片提供器。
- * <p>
- * 请求协议与 Python 示例保持一致：POST JSON 到 `/track/image`，请求体为
- * <code>{"points":[[lon,lat], ...]}</code>，响应体为 PNG 字节。
- */
+    /**
+     * 默认 HTTP 轨迹地图图片提供器。
+     * <p>
+     * 请求协议与 Python 示例保持一致：POST JSON 到 `/track/image`，请求体为
+     * <code>{"points":[[lon,lat], ...]}</code>，响应体为 PNG 字节。
+     */
 public final class HttpTrackMapImageProvider implements MapImageProvider {
+    // private static final String TAG = "HttpMapProvider";
     /** 与 Python 示例一致的默认接口地址。 */
-    public static final String DEFAULT_URL = "https://azurehk.crazythursdayvivo50.cn/trace/track/image";
+    public static final String DEFAULT_URL = MapEndpoint.DEFAULT_URL;
     /** 与 Python 示例一致的默认超时（毫秒）。 */
     public static final int DEFAULT_TIMEOUT_MS = 10_000;
     /** 与 Python 示例一致的默认最大图片大小（字节）。 */
@@ -66,7 +69,7 @@ public final class HttpTrackMapImageProvider implements MapImageProvider {
         if (maxPngBytes <= 0) {
             throw new IllegalArgumentException("maxPngBytes must be > 0");
         }
-        this.url = url;
+        this.url = MapEndpoint.normalize(url);
         this.timeoutMs = timeoutMs;
         this.maxPngBytes = maxPngBytes;
         this.basicAuthHeader = buildBasicAuthHeader(username, password);
@@ -78,16 +81,18 @@ public final class HttpTrackMapImageProvider implements MapImageProvider {
             throw new IllegalArgumentException("points must not be empty");
         }
 
+        // long startMs = System.currentTimeMillis();
         String body = buildRequestJson(points);
         HttpURLConnection conn = null;
         try {
+            // Log.i(TAG, "[MAP] fetch start, url=" + url + ", points=" + points.size());
             conn = (HttpURLConnection) new URL(url).openConnection();
             conn.setRequestMethod("POST");
             conn.setConnectTimeout(timeoutMs);
             conn.setReadTimeout(timeoutMs);
             conn.setDoOutput(true);
             conn.setRequestProperty("Content-Type", "application/json");
-            conn.setRequestProperty("accept", "application/json");
+            conn.setRequestProperty("Accept", "image/png,application/octet-stream,*/*");
             if (basicAuthHeader != null) {
                 conn.setRequestProperty("Authorization", basicAuthHeader);
             }
@@ -102,6 +107,9 @@ public final class HttpTrackMapImageProvider implements MapImageProvider {
             int code = conn.getResponseCode();
             if (code < 200 || code >= 300) {
                 String errBody = readAllAsString(safeErrorStream(conn), 4096);
+                // String respCt = conn.getHeaderField("Content-Type");
+                // Log.e(TAG, "HTTP map request failed, url=" + url + ", code=" + code
+                //         + ", respContentType=" + respCt + ", body=" + errBody);
                 throw new IOException("http status=" + code + ", body=" + errBody);
             }
 
@@ -109,7 +117,13 @@ public final class HttpTrackMapImageProvider implements MapImageProvider {
             if (png.length == 0) {
                 throw new IOException("empty png response");
             }
+            // Log.i(TAG, "[MAP] fetch success, url=" + url + ", pngBytes=" + png.length
+            //         + ", costMs=" + (System.currentTimeMillis() - startMs));
             return png;
+        // } catch (Exception e) {
+        //     Log.e(TAG, "[MAP] fetch failed, url=" + url + ", costMs=" + (System.currentTimeMillis() - startMs)
+        //             + ", msg=" + e.getMessage(), e);
+        //     throw e;
         } finally {
             if (conn != null) {
                 conn.disconnect();
