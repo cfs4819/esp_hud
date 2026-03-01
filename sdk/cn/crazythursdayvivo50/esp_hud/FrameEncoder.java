@@ -14,8 +14,8 @@ final class FrameEncoder {
         payload[p++] = 0x00;
         p = putInt16LE(payload, p, clampI16(snapshot.speedKmh));
         p = putInt16LE(payload, p, clampI16(snapshot.engineRpm));
-        p = putInt32LE(payload, p, snapshot.odoMeters);
         p = putInt32LE(payload, p, snapshot.tripOdoMeters);
+        p = putInt32LE(payload, p, snapshot.odoMeters);
         p = putInt16LE(payload, p, clampI16(snapshot.outsideTempDeciC));
         p = putInt16LE(payload, p, clampI16(snapshot.insideTempDeciC));
         p = putInt16LE(payload, p, clampI16(snapshot.batteryMv));
